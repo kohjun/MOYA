@@ -1,6 +1,7 @@
 // src/routes/auth.js
 import { z } from 'zod';
 import * as authService from '../services/authService.js';
+import { saveFcmToken } from '../services/fcmService.js';
 import { signAccessToken, authenticate } from '../middleware/auth.js';
 
 // 입력 유효성 검사 스키마
@@ -125,5 +126,20 @@ export default async function authRoutes(fastify) {
     const user = await authService.getUserById(request.user.id);
     if (!user) return reply.code(404).send({ error: 'USER_NOT_FOUND' });
     return reply.send({ user });
+  });
+
+  // ── POST /auth/fcm-token ──────────────────────────────────────────────────
+  // 앱 시작 또는 토큰 갱신 시 FCM 토큰을 서버에 등록
+  fastify.post('/fcm-token', { preHandler: [authenticate] }, async (request, reply) => {
+    const parsed = z.object({
+      fcm_token: z.string().min(1).max(500),
+    }).safeParse(request.body);
+
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'VALIDATION_ERROR' });
+    }
+
+    await saveFcmToken(request.user.id, parsed.data.fcm_token);
+    return reply.send({ message: 'FCM token registered' });
   });
 }

@@ -3,7 +3,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
-const _baseUrl = 'http://localhost:3000';  // 개발 서버 (배포 시 변경)
+const _baseUrl = 'http://10.0.2.2:3000';  // 개발 서버 (배포 시 변경)
 
 class ApiClient {
   late final Dio _dio;
@@ -11,6 +11,9 @@ class ApiClient {
 
   static final ApiClient _instance = ApiClient._internal();
   factory ApiClient() => _instance;
+
+  /// 401 복구 실패 시 호출되는 콜백 (AuthNotifier가 등록)
+  static void Function()? onUnauthenticated;
 
   ApiClient._internal() {
     _dio = Dio(BaseOptions(
@@ -31,28 +34,24 @@ class ApiClient {
         return handler.next(options);
       },
 
-      // 에러 시: 401이면 토큰 갱신 후 재요청
+      // 에러 시: 401이면 토큰 갱신 후 재요청 (에러 코드 무관하게 시도)
       onError: (error, handler) async {
         if (error.response?.statusCode == 401) {
-          final errorCode = error.response?.data?['error'];
+          try {
+            await _refreshAccessToken();
 
-          // 토큰 만료 → 자동 갱신 시도
-          if (errorCode == 'TOKEN_EXPIRED') {
-            try {
-              await _refreshAccessToken();
+            // 갱신된 토큰으로 원래 요청 재시도
+            final retryOptions = error.requestOptions;
+            final newToken = await _storage.read(key: 'access_token');
+            retryOptions.headers['Authorization'] = 'Bearer $newToken';
 
-              // 갱신된 토큰으로 원래 요청 재시도
-              final retryOptions = error.requestOptions;
-              final newToken = await _storage.read(key: 'access_token');
-              retryOptions.headers['Authorization'] = 'Bearer $newToken';
-
-              final retryResponse = await _dio.fetch(retryOptions);
-              return handler.resolve(retryResponse);
-            } catch (refreshError) {
-              // 갱신 실패 → 로그아웃 처리
-              await clearTokens();
-              return handler.reject(error);
-            }
+            final retryResponse = await _dio.fetch(retryOptions);
+            return handler.resolve(retryResponse);
+          } catch (_) {
+            // 갱신 실패 → 토큰 삭제 + 로그인 화면으로 이동
+            await clearTokens();
+            onUnauthenticated?.call();
+            return handler.reject(error);
           }
         }
         return handler.next(error);

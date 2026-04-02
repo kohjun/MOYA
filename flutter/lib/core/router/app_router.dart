@@ -1,0 +1,97 @@
+// lib/core/router/app_router.dart
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+
+import '../../features/auth/data/auth_repository.dart';
+import '../../features/auth/presentation/login_screen.dart';
+import '../../features/auth/presentation/register_screen.dart';
+import '../../features/home/presentation/home_screen.dart';
+import '../../features/map/presentation/map_screen.dart';
+import '../../features/history/presentation/history_screen.dart';
+import '../../features/geofence/presentation/geofence_screen.dart';
+import '../../features/settings/presentation/settings_screen.dart';
+import '../../features/session/presentation/member_management_screen.dart';
+
+// 라우트 경로 상수
+abstract class AppRoutes {
+  static const login    = '/login';
+  static const register = '/register';
+  static const home     = '/';
+  static const map      = '/map/:sessionId';
+  static const history  = '/history/:sessionId';
+  static const geofence = '/geofence/:sessionId';
+  static const settings = '/settings';
+  static const members  = '/session/:sessionId/members';
+}
+
+final routerProvider = Provider<GoRouter>((ref) {
+  final authState = ref.watch(authProvider);
+
+  return GoRouter(
+    initialLocation: AppRoutes.home,
+    redirect: (context, state) {
+      final isLoggedIn = authState.valueOrNull != null;
+      final isLoading  = authState.isLoading;
+
+      if (isLoading) return null;
+
+      final isAuthRoute = state.matchedLocation == AppRoutes.login ||
+          state.matchedLocation == AppRoutes.register;
+
+      if (!isLoggedIn && !isAuthRoute) return AppRoutes.login;
+      if (isLoggedIn && isAuthRoute)   return AppRoutes.home;
+      return null;
+    },
+    routes: [
+      GoRoute(
+        path: AppRoutes.login,
+        builder: (context, state) => const LoginScreen(),
+      ),
+      GoRoute(
+        path: AppRoutes.register,
+        builder: (context, state) => const RegisterScreen(),
+      ),
+      GoRoute(
+        path: AppRoutes.home,
+        builder: (context, state) => const HomeScreen(),
+      ),
+      GoRoute(
+        path: AppRoutes.map,
+        builder: (context, state) {
+          final sessionId = state.pathParameters['sessionId']!;
+          return MapScreen(sessionId: sessionId);
+        },
+      ),
+      GoRoute(
+        path: AppRoutes.history,
+        builder: (context, state) {
+          final sessionId = state.pathParameters['sessionId']!;
+          return HistoryScreen(sessionId: sessionId);
+        },
+      ),
+      GoRoute(
+        path: AppRoutes.geofence,
+        builder: (context, state) {
+          final sessionId = state.pathParameters['sessionId']!;
+          return GeofenceScreen(sessionId: sessionId);
+        },
+      ),
+      GoRoute(
+        path: AppRoutes.settings,
+        builder: (context, state) => const SettingsScreen(),
+      ),
+      GoRoute(
+        path: AppRoutes.members,
+        builder: (context, state) {
+          final sessionId = state.pathParameters['sessionId']!;
+          return MemberManagementScreen(sessionId: sessionId);
+        },
+      ),
+    ],
+    errorBuilder: (context, state) => Scaffold(
+      body: Center(child: Text('페이지를 찾을 수 없습니다: ${state.error}')),
+    ),
+  );
+});

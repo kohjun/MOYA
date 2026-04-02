@@ -86,6 +86,14 @@ final authRepositoryProvider = Provider((ref) => AuthRepository());
 class AuthNotifier extends AsyncNotifier<AppUser?> {
   @override
   Future<AppUser?> build() async {
+    // 401 복구 실패 시 자동 로그아웃 (build 완료 후 실행)
+    ApiClient.onUnauthenticated = () {
+      Future.microtask(() {
+        if (state.valueOrNull != null) {
+          state = const AsyncData(null);
+        }
+      });
+    };
     // 앱 시작 시 저장된 토큰으로 사용자 복원
     return ref.read(authRepositoryProvider).getMe();
   }

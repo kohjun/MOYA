@@ -21,6 +21,9 @@ const migrations = [
     updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
   )`,
 
+  // ─── users 테이블에 fcm_token 컬럼 추가 (마이그레이션) ──────────────
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS fcm_token VARCHAR(500)`,
+
   // ─── Refresh Token 저장소 ─────────────────────────────────────────
   `CREATE TABLE IF NOT EXISTS refresh_tokens (
     id         UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -99,6 +102,9 @@ const migrations = [
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
   )`,
   `CREATE INDEX IF NOT EXISTS idx_geofences_session ON geofences(session_id)`,
+
+  // ─── session_members 역할 컬럼 추가 (host / admin / member) ─────────────
+  `ALTER TABLE session_members ADD COLUMN IF NOT EXISTS role VARCHAR(20) NOT NULL DEFAULT 'member'`,
 ];
 
 (async () => {

@@ -3,12 +3,29 @@ import { z } from 'zod';
 import { authenticate } from '../middleware/auth.js';
 import * as sessionService from '../services/sessionService.js';
 import * as locationService from '../services/locationService.js';
+import { getIo, EVENTS } from '../websocket/index.js';
 
 const createSessionSchema = z.object({
   name: z.string().max(100).optional(),
 });
 
 export default async function sessionRoutes(fastify) {
+  // Flutter 클라이언트가 Content-Type: application/json + 빈 body로 요청하는 경우 처리
+  // (예: POST /:sessionId/leave) — FST_ERR_CTP_EMPTY_JSON_BODY 방지
+  fastify.removeContentTypeParser('application/json');
+  fastify.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
+    if (!body) {
+      done(null, {});
+      return;
+    }
+    try {
+      done(null, JSON.parse(body));
+    } catch (err) {
+      err.statusCode = 400;
+      done(err);
+    }
+  });
+
   // 모든 세션 라우트는 인증 필요
   fastify.addHook('preHandler', authenticate);
 
@@ -131,6 +148,83 @@ export default async function sessionRoutes(fastify) {
       unit: 'meters',
       available: distance !== null,
     });
+  });
+
+  // ── PATCH /sessions/:sessionId/members/:userId/role ─────────────────────
+  // 멤버 역할 변경 (host/admin만)
+  fastify.patch('/:sessionId/members/:userId/role', async (request, reply) => {
+    const { sessionId, userId: targetUserId } = request.params;
+    const { role: newRole } = request.body || {};
+
+    if (!['admin', 'member'].includes(newRole)) {
+      return reply.code(400).send({ error: 'INVALID_ROLE' });
+    }
+
+    try {
+      await sessionService.updateMemberRole(
+        request.user.id, sessionId, targetUserId, newRole
+      );
+
+      const io = getIo();
+      if (io) {
+        io.to(`session:${sessionId}`).emit(EVENTS.ROLE_CHANGED, {
+          userId: targetUserId,
+          role: newRole,
+          sessionId,
+          updatedBy: request.user.id,
+        });
+      }
+
+      return reply.send({ role: newRole });
+    } catch (err) {
+      const errorMap = {
+        PERMISSION_DENIED:        403,
+        CANNOT_CHANGE_OWN_ROLE:   400,
+        CANNOT_CHANGE_HOST_ROLE:  400,
+        TARGET_NOT_A_MEMBER:      404,
+        SESSION_NOT_FOUND:        404,
+        INVALID_ROLE:             400,
+      };
+      return reply.code(errorMap[err.message] || 500).send({ error: err.message });
+    }
+  });
+
+  // ── DELETE /sessions/:sessionId/members/:userId ──────────────────────────
+  // 멤버 강제 퇴장 (host/admin만)
+  fastify.delete('/:sessionId/members/:userId', async (request, reply) => {
+    const { sessionId, userId: targetUserId } = request.params;
+
+    try {
+      await sessionService.kickMember(request.user.id, sessionId, targetUserId);
+
+      const io = getIo();
+      if (io) {
+        // 강퇴 대상에게 kicked 이벤트 (개인 룸)
+        io.to(`user:${targetUserId}`).emit(EVENTS.KICKED, {
+          sessionId,
+          by: request.user.id,
+        });
+        // 세션 전체에 member:left 브로드캐스트 (강퇴 대상 제외)
+        io.to(`session:${sessionId}`)
+          .except(`user:${targetUserId}`)
+          .emit(EVENTS.MEMBER_LEFT, {
+            userId: targetUserId,
+            reason: 'kicked',
+            timestamp: Date.now(),
+          });
+      }
+
+      return reply.send({ message: 'Member kicked' });
+    } catch (err) {
+      const errorMap = {
+        PERMISSION_DENIED:      403,
+        CANNOT_KICK_YOURSELF:   400,
+        CANNOT_KICK_HOST:       400,
+        TARGET_NOT_A_MEMBER:    404,
+        SESSION_NOT_FOUND:      404,
+      };
+      return reply.code(errorMap[err.message] || 500).send({ error: err.message });
+    }
   });
 
   // ── PATCH /sessions/:sessionId/sharing ───────────────────────────────────

@@ -2,7 +2,6 @@
 import Fastify from 'fastify';
 import fastifyCors from '@fastify/cors';
 import fastifyCookie from '@fastify/cookie';
-import { createServer } from 'http';
 import dotenv from 'dotenv';
 
 import { connectRedis } from './config/redis.js';
@@ -10,12 +9,10 @@ import { query as dbQuery } from './config/database.js';
 import { createSocketServer } from './websocket/index.js';
 import authRoutes from './routes/auth.js';
 import sessionRoutes from './routes/sessions.js';
+import geofenceRoutes from './routes/geofences.js';
 
 dotenv.config();
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Fastify 앱 초기화
-// ─────────────────────────────────────────────────────────────────────────────
 const fastify = Fastify({
   logger: {
     level: process.env.NODE_ENV === 'production' ? 'warn' : 'info',
@@ -31,8 +28,9 @@ await fastify.register(fastifyCors, {
 await fastify.register(fastifyCookie);
 
 // ─── 라우트 등록 ───────────────────────────────────────────────────────────
-fastify.register(authRoutes,    { prefix: '/auth' });
-fastify.register(sessionRoutes, { prefix: '/sessions' });
+fastify.register(authRoutes,     { prefix: '/auth' });
+fastify.register(sessionRoutes,  { prefix: '/sessions' });
+fastify.register(geofenceRoutes, { prefix: '/sessions' });
 
 // ─── 헬스체크 ─────────────────────────────────────────────────────────────
 fastify.get('/health', async () => {
@@ -58,44 +56,37 @@ fastify.setErrorHandler((error, request, reply) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const start = async () => {
   try {
-    // Redis 연결
     await connectRedis();
 
-    // DB 연결 테스트
     await dbQuery('SELECT NOW()');
     console.log('[DB] PostgreSQL connected');
 
-    // HTTP 서버 생성 (Socket.IO와 공유)
-    const httpServer = createServer(fastify.server);
-
-    // Socket.IO 서버 붙이기
-    const io = createSocketServer(httpServer);
-
-    // Fastify 초기화 (라우트 등록 완료)
+    // Fastify 초기화 먼저
     await fastify.ready();
+
+    // Socket.IO를 Fastify 내부 서버에 직접 붙이기
+    const io = createSocketServer(fastify.server);
 
     const PORT = Number(process.env.PORT) || 3000;
     const HOST = '0.0.0.0';
 
-    httpServer.listen(PORT, HOST, () => {
-      console.log(`
+    // Fastify로 직접 리슨
+    await fastify.listen({ port: PORT, host: HOST });
+
+    console.log(`
 ╔══════════════════════════════════════════╗
 ║   🗺️  Location Sharing Server Started     ║
 ║   REST API : http://${HOST}:${PORT}       ║
 ║   WebSocket: ws://${HOST}:${PORT}         ║
 ║   Env      : ${process.env.NODE_ENV}                ║
 ╚══════════════════════════════════════════╝
-      `);
-    });
+    `);
 
-    // Graceful shutdown
     const shutdown = async (signal) => {
       console.log(`\n[${signal}] Shutting down...`);
       io.close();
-      httpServer.close(async () => {
-        await fastify.close();
-        process.exit(0);
-      });
+      await fastify.close();
+      process.exit(0);
     };
 
     process.on('SIGTERM', () => shutdown('SIGTERM'));

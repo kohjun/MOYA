@@ -32,7 +32,7 @@ const generateSessionCode = async () => {
 export const createSession = async (hostUserId, { name }) => {
   const code = await generateSessionCode();
 
-  const { rows } = await withTransaction(async (client) => {
+  const rows = await withTransaction(async (client) => {
     // 세션 생성
     const session = await client.query(
       `INSERT INTO sessions (host_user_id, session_code, name)
@@ -42,10 +42,10 @@ export const createSession = async (hostUserId, { name }) => {
     );
     const sessionId = session.rows[0].id;
 
-    // 호스트를 첫 번째 멤버로 자동 추가
+    // 호스트를 첫 번째 멤버로 자동 추가 (role = 'host')
     await client.query(
-      `INSERT INTO session_members (session_id, user_id)
-       VALUES ($1, $2)`,
+      `INSERT INTO session_members (session_id, user_id, role)
+       VALUES ($1, $2, 'host')`,
       [sessionId, hostUserId]
     );
 
@@ -142,9 +142,12 @@ export const endSession = async (hostUserId, sessionId) => {
 export const getSessionMembers = async (sessionId) => {
   const { rows } = await query(
     `SELECT sm.user_id, sm.joined_at, sm.sharing_enabled,
-            u.nickname, u.avatar_url
+            CASE WHEN s.host_user_id = sm.user_id THEN 'host' ELSE sm.role END AS role,
+            u.nickname, u.avatar_url,
+            (s.host_user_id = sm.user_id) AS is_host
      FROM session_members sm
      JOIN users u ON u.id = sm.user_id
+     JOIN sessions s ON s.id = sm.session_id
      WHERE sm.session_id = $1 AND sm.left_at IS NULL
      ORDER BY sm.joined_at`,
     [sessionId]
@@ -159,6 +162,85 @@ export const getSessionMembers = async (sessionId) => {
   );
 
   return membersWithLocation;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 멤버 역할 변경 (host/admin만 가능)
+// ─────────────────────────────────────────────────────────────────────────────
+export const updateMemberRole = async (requesterId, sessionId, targetUserId, newRole) => {
+  if (requesterId === targetUserId) throw new Error('CANNOT_CHANGE_OWN_ROLE');
+  if (!['admin', 'member'].includes(newRole)) throw new Error('INVALID_ROLE');
+
+  // 세션 정보 + 요청자/대상 역할 한 번에 조회
+  const { rows } = await query(
+    `SELECT s.host_user_id,
+            sm_req.role AS requester_role,
+            sm_tgt.user_id AS target_exists
+     FROM sessions s
+     LEFT JOIN session_members sm_req
+       ON sm_req.session_id = s.id AND sm_req.user_id = $2 AND sm_req.left_at IS NULL
+     LEFT JOIN session_members sm_tgt
+       ON sm_tgt.session_id = s.id AND sm_tgt.user_id = $3 AND sm_tgt.left_at IS NULL
+     WHERE s.id = $1`,
+    [sessionId, requesterId, targetUserId]
+  );
+  if (rows.length === 0) throw new Error('SESSION_NOT_FOUND');
+
+  const { host_user_id, requester_role, target_exists } = rows[0];
+  if (!target_exists) throw new Error('TARGET_NOT_A_MEMBER');
+  if (targetUserId === host_user_id) throw new Error('CANNOT_CHANGE_HOST_ROLE');
+
+  const effectiveRequesterRole = requesterId === host_user_id ? 'host' : requester_role;
+  if (!['host', 'admin'].includes(effectiveRequesterRole)) throw new Error('PERMISSION_DENIED');
+
+  await query(
+    `UPDATE session_members SET role = $1
+     WHERE session_id = $2 AND user_id = $3 AND left_at IS NULL`,
+    [newRole, sessionId, targetUserId]
+  );
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 멤버 강제 퇴장 (host/admin만 가능)
+// ─────────────────────────────────────────────────────────────────────────────
+export const kickMember = async (requesterId, sessionId, targetUserId) => {
+  if (requesterId === targetUserId) throw new Error('CANNOT_KICK_YOURSELF');
+
+  const { rows } = await query(
+    `SELECT s.host_user_id,
+            sm_req.role AS requester_role,
+            sm_tgt.role AS target_role,
+            sm_tgt.user_id AS target_exists
+     FROM sessions s
+     LEFT JOIN session_members sm_req
+       ON sm_req.session_id = s.id AND sm_req.user_id = $2 AND sm_req.left_at IS NULL
+     LEFT JOIN session_members sm_tgt
+       ON sm_tgt.session_id = s.id AND sm_tgt.user_id = $3 AND sm_tgt.left_at IS NULL
+     WHERE s.id = $1`,
+    [sessionId, requesterId, targetUserId]
+  );
+  if (rows.length === 0) throw new Error('SESSION_NOT_FOUND');
+
+  const { host_user_id, requester_role, target_role, target_exists } = rows[0];
+  if (!target_exists) throw new Error('TARGET_NOT_A_MEMBER');
+
+  const effectiveRequesterRole = requesterId === host_user_id ? 'host' : requester_role;
+  const effectiveTargetRole    = targetUserId === host_user_id ? 'host' : (target_role ?? 'member');
+
+  if (!['host', 'admin'].includes(effectiveRequesterRole)) throw new Error('PERMISSION_DENIED');
+  if (effectiveTargetRole === 'host') throw new Error('CANNOT_KICK_HOST');
+  // 관리자는 다른 관리자를 강퇴 불가
+  if (effectiveRequesterRole === 'admin' && effectiveTargetRole === 'admin') {
+    throw new Error('PERMISSION_DENIED');
+  }
+
+  await query(
+    `UPDATE session_members SET left_at = NOW()
+     WHERE session_id = $1 AND user_id = $2 AND left_at IS NULL`,
+    [sessionId, targetUserId]
+  );
+
+  await delCache(`location:${sessionId}:${targetUserId}`);
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

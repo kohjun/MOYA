@@ -2,6 +2,7 @@
 
 import 'dart:async';
 import 'package:battery_plus/battery_plus.dart';
+import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 import 'socket_service.dart';
 
@@ -10,11 +11,11 @@ import 'socket_service.dart';
 // ─────────────────────────────────────────────────────────────────────────────
 class LocationConfig {
   // 이동 중: 고정밀, 짧은 간격
-  static const AndroidSettings androidMoving = AndroidSettings(
+  static final AndroidSettings androidMoving = AndroidSettings(
     accuracy: LocationAccuracy.high,
-    intervalDuration: Duration(seconds: 3),
+    intervalDuration: const Duration(seconds: 3),
     distanceFilter: 5,  // 5m 이상 이동 시에만 갱신
-    foregroundNotificationConfig: ForegroundNotificationConfig(
+    foregroundNotificationConfig: const ForegroundNotificationConfig(
       notificationText: '위치를 공유하고 있습니다',
       notificationTitle: '📍 위치 공유 중',
       enableWakeLock: true,
@@ -22,13 +23,13 @@ class LocationConfig {
   );
 
   // 정지 중: 배터리 절약 모드
-  static const AndroidSettings androidIdle = AndroidSettings(
+  static final AndroidSettings androidIdle = AndroidSettings(
     accuracy: LocationAccuracy.medium,
-    intervalDuration: Duration(seconds: 15),
+    intervalDuration: const Duration(seconds: 15),
     distanceFilter: 20,
   );
 
-  static const AppleSettings iosSettings = AppleSettings(
+  static final AppleSettings iosSettings = AppleSettings(
     accuracy: LocationAccuracy.high,
     activityType: ActivityType.fitness,
     distanceFilter: 5,
@@ -46,6 +47,7 @@ class GpsLocationService {
   DateTime? _lastSentAt;
   bool _isTracking = false;
   bool _isMoving = false;
+  bool _sharingEnabled = true;
 
   final _battery = Battery();
   Timer? _statusTimer;
@@ -94,7 +96,7 @@ class GpsLocationService {
       locationSettings: locationSettings,
     ).listen(
       _onPositionUpdate,
-      onError: (error) => print('[GPS] Error: $error'),
+      onError: (error) => debugPrint('[GPS] Error: $error'),
     );
 
     // 상태(이동중/정지) 감지 타이머
@@ -125,9 +127,17 @@ class GpsLocationService {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
+  // 위치 공유 ON/OFF 제어
+  // ─────────────────────────────────────────────────────────────────────────
+  void setSharingEnabled(bool enabled) {
+    _sharingEnabled = enabled;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
   // Socket으로 위치 전송
   // ─────────────────────────────────────────────────────────────────────────
   Future<void> _sendToSocket(Position position) async {
+    if (!_sharingEnabled) return; // 공유 OFF 시 전송 중단
     int? batteryLevel;
     try {
       batteryLevel = await _battery.batteryLevel;

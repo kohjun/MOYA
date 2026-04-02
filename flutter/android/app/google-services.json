@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "933190536539",
+    "project_id": "lsbproject",
+    "storage_bucket": "lsbproject.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:933190536539:android:74be163064cd3ceccb9e7e",
+        "android_client_info": {
+          "package_name": "com.example.location_sharing_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAZ8JdOLpHD0GuU8f-f6R3kKGX6-SUPG_8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

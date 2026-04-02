@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(flutter pub:*)",
+      "Bash(where flutter:*)",
+      "Read(//c/Users/kohju/AppData/Local/flutter/bin/**)",
+      "Read(//c/Users/kohju/flutter/bin/**)",
+      "Bash(\"/c/Users/kohju/flutter/bin/flutter.bat\" pub:*)",
+      "Bash(\"/c/Users/kohju/flutter/bin/flutter.bat\" analyze:*)",
+      "Bash(\"/c/Program Files/Android/Android Studio/jbr/bin/java.exe\" -version 2>&1)",
+      "Bash(JAVA_HOME=\"/c/Program Files/Android/Android Studio/jbr\" PATH=\"/c/Program Files/Android/Android Studio/jbr/bin:$PATH\" \"/c/Users/kohju/AppData/Local/Android/Sdk/cmdline-tools/latest/bin/sdkmanager.bat\" --list)",
+      "Bash(JAVA_HOME=\"/c/Program Files/Android/Android Studio/jbr\" PATH=\"/c/Program Files/Android/Android Studio/jbr/bin:$PATH\" printf 'y\\\\n')",
+      "Bash(\"/c/Users/kohju/AppData/Local/Android/Sdk/cmdline-tools/latest/bin/sdkmanager.bat\" \"system-images;android-34;google_apis_playstore;x86_64\")",
+      "Bash(cmd.exe /c \"set JAVA_HOME=C:\\\\Program Files\\\\Android\\\\Android Studio\\\\jbr && \\\\\"C:\\\\Program Files\\\\Android\\\\Android Studio\\\\jbr\\\\bin\\\\java.exe\\\\\" -version\" 2>&1)",
+      "Bash(C:Userskohjuflutterbinflutter.bat pub:*)",
+      "Bash(/c/Users/kohju/flutter/bin/flutter pub:*)",
+      "Bash(find /c/LBS/flutter/lib/features/map -type f -name *.dart)",
+      "Bash(find /c/LBS/flutter/lib/core/router -type f -name *.dart)",
+      "Bash(dart analyze:*)",
+      "Bash(flutter analyze:*)"
+    ]
+  }
+}

@@ -4,6 +4,8 @@ import { verifySocketToken } from '../middleware/auth.js';
 import { redisClient, subClient } from '../config/redis.js';
 import * as locationService from '../services/locationService.js';
 import * as sessionService from '../services/sessionService.js';
+import { sendSosAlert, sendGeofenceAlert } from '../services/fcmService.js';
+import { checkGeofences } from '../services/geofenceService.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Socket.IO 이벤트 상수 (클라이언트와 공유하는 프로토콜)
@@ -24,14 +26,22 @@ export const EVENTS = {
   STATUS_CHANGED:    'status:changed',
   SOS_ALERT:         'sos:alert',
   SESSION_SNAPSHOT:  'session:snapshot',    // 첫 연결 시 전체 상태
+  KICKED:            'kicked',              // 강제 퇴장
+  ROLE_CHANGED:      'role_changed',        // 역할 변경 브로드캐스트
   ERROR:             'error',
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// io 인스턴스 참조 (routes에서 WebSocket 이벤트 발행 시 사용)
+// ─────────────────────────────────────────────────────────────────────────────
+let _io = null;
+export const getIo = () => _io;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Socket.IO 서버 초기화
 // ─────────────────────────────────────────────────────────────────────────────
 export const createSocketServer = (httpServer) => {
-  const io = new Server(httpServer, {
+  _io = new Server(httpServer, {
     cors: {
       origin: process.env.ALLOWED_ORIGINS?.split(',') || '*',
       credentials: true,
@@ -41,6 +51,7 @@ export const createSocketServer = (httpServer) => {
     pingInterval: 25000,
     transports: ['websocket', 'polling'],
   });
+  const io = _io; // 함수 내 로컬 별칭 (기존 코드 호환)
 
   // ── 전역 인증 미들웨어 ─────────────────────────────────────────────────
   // 모든 소켓 연결 전에 JWT 검증
@@ -167,6 +178,30 @@ export const createSocketServer = (httpServer) => {
         // 같은 서버 인스턴스 내 즉시 브로드캐스트 (레이턴시 최소화)
         socket.to(`session:${sessionId}`).emit(EVENTS.LOCATION_CHANGED, broadcastData);
 
+        // 지오펜스 진입/이탈 감지 (비동기, 메인 흐름 블로킹 없음)
+        checkGeofences(userId, sessionId, lat, lng)
+          .then(({ entered, exited }) => {
+            if (entered.length > 0) {
+              sendGeofenceAlert({
+                sessionId,
+                userId,
+                nickname:   socket.user.nickname,
+                geofences:  entered,
+                eventType:  'enter',
+              }).catch((e) => console.error('[WS] FCM geofence enter error:', e));
+            }
+            if (exited.length > 0) {
+              sendGeofenceAlert({
+                sessionId,
+                userId,
+                nickname:   socket.user.nickname,
+                geofences:  exited,
+                eventType:  'exit',
+              }).catch((e) => console.error('[WS] FCM geofence exit error:', e));
+            }
+          })
+          .catch((e) => console.error('[WS] checkGeofences error:', e));
+
       } catch (err) {
         console.error('[WS] location update error:', err);
       }
@@ -211,7 +246,14 @@ export const createSocketServer = (httpServer) => {
       // 세션 전체에 SOS 브로드캐스트 (본인 포함)
       io.to(`session:${sessionId}`).emit(EVENTS.SOS_ALERT, sosPayload);
 
-      // TODO: Phase 2 - FCM 푸시 알림으로 백그라운드 멤버에게도 전달
+      // FCM 고우선순위 푸시: 백그라운드 멤버에게도 전달
+      sendSosAlert({
+        sessionId,
+        triggeredByUserId: userId,
+        nickname: socket.user.nickname,
+        location: lat && lng ? { lat, lng } : null,
+        sosMessage: message || '긴급 상황 발생!',
+      }).catch((err) => console.error('[WS] FCM SOS error:', err));
     });
 
     // ── disconnect ────────────────────────────────────────────────────

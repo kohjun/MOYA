@@ -1,10 +1,12 @@
 // lib/core/services/socket_service.dart
 
 import 'dart:async';
+import 'dart:math' as math;
+import 'package:flutter/foundation.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
 import '../network/api_client.dart';
 
-const _wsUrl = 'http://localhost:3000';
+const _wsUrl = 'http://10.0.2.2:3000';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 위치 데이터 모델
@@ -70,6 +72,8 @@ class SocketEvents {
   static const statusChanged   = 'status:changed';
   static const sosAlert        = 'sos:alert';
   static const sessionSnapshot = 'session:snapshot';
+  static const kicked          = 'kicked';
+  static const roleChanged     = 'role_changed';
   static const error           = 'error';
 }
 
@@ -81,6 +85,14 @@ class SocketService {
   bool _isConnected = false;
   String? _currentSessionId;
 
+  // ── 지수 백오프 재연결 ────────────────────────────────────────────────────
+  int    _reconnectAttempts   = 0;
+  bool   _reconnectScheduled  = false;
+  Timer? _reconnectTimer;
+  static const _baseDelayMs      = 3000;  // 초기 대기 시간: 3s
+  static const _maxDelayMs       = 30000; // 최대 대기 시간: 30s
+  static const _maxReconnectAttempts = 3; // 최대 재연결 횟수
+
   // 스트림 컨트롤러 (UI 레이어에서 구독)
   final _locationController    = StreamController<LocationPayload>.broadcast();
   final _memberJoinController  = StreamController<Map<String, dynamic>>.broadcast();
@@ -89,6 +101,8 @@ class SocketService {
   final _sosController         = StreamController<Map<String, dynamic>>.broadcast();
   final _snapshotController    = StreamController<Map<String, dynamic>>.broadcast();
   final _connectionController  = StreamController<bool>.broadcast();
+  final _kickedController      = StreamController<Map<String, dynamic>>.broadcast();
+  final _roleChangedController = StreamController<Map<String, dynamic>>.broadcast();
 
   Stream<LocationPayload>         get onLocationChanged => _locationController.stream;
   Stream<Map<String, dynamic>>    get onMemberJoined    => _memberJoinController.stream;
@@ -97,6 +111,8 @@ class SocketService {
   Stream<Map<String, dynamic>>    get onSosAlert        => _sosController.stream;
   Stream<Map<String, dynamic>>    get onSnapshot        => _snapshotController.stream;
   Stream<bool>                    get onConnectionChange => _connectionController.stream;
+  Stream<Map<String, dynamic>>    get onKicked          => _kickedController.stream;
+  Stream<Map<String, dynamic>>    get onRoleChanged     => _roleChangedController.stream;
   bool get isConnected => _isConnected;
 
   static final SocketService _instance = SocketService._internal();
@@ -116,15 +132,15 @@ class SocketService {
       _wsUrl,
       io.OptionBuilder()
           .setTransports(['websocket'])
-          .enableAutoConnect()
+          .disableAutoConnect()          // 핸들러 등록 후 수동 연결
+          .disableReconnection()         // socket.io 내장 재연결 비활성화 → 직접 관리
           .setExtraHeaders({'Authorization': 'Bearer $token'})
-          .setAuth({'token': token})  // Socket.IO auth 방식
-          .setReconnectionAttempts(5)
-          .setReconnectionDelay(2000)
+          .setAuth({'token': token})
           .build(),
     );
 
     _registerEventHandlers();
+    _socket!.connect(); // 핸들러 등록 후 연결 시작
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -134,16 +150,24 @@ class SocketService {
     _socket!
       ..onConnect((_) {
         _isConnected = true;
+        _reconnectAttempts  = 0;         // 성공 시 카운터 초기화
+        _reconnectScheduled = false;
+        _reconnectTimer?.cancel();
         _connectionController.add(true);
-        print('[Socket] Connected');
+        debugPrint('[Socket] Connected');
       })
       ..onDisconnect((reason) {
         _isConnected = false;
         _connectionController.add(false);
-        print('[Socket] Disconnected: $reason');
+        debugPrint('[Socket] Disconnected: $reason');
+        // 클라이언트 측 수동 해제가 아닐 때만 재연결 시도
+        if (reason != 'io client disconnect') {
+          _scheduleReconnect();
+        }
       })
       ..onConnectError((err) {
-        print('[Socket] Connect error: $err');
+        debugPrint('[Socket] Connect error: $err');
+        _scheduleReconnect();
       })
 
       // 다른 멤버 위치 수신
@@ -152,7 +176,7 @@ class SocketService {
           final payload = LocationPayload.fromMap(Map<String, dynamic>.from(data));
           _locationController.add(payload);
         } catch (e) {
-          print('[Socket] locationChanged parse error: $e');
+          debugPrint('[Socket] locationChanged parse error: $e');
         }
       })
 
@@ -172,7 +196,15 @@ class SocketService {
 
       // 세션 참가 시 전체 스냅샷
       ..on(SocketEvents.sessionSnapshot, (data) =>
-          _snapshotController.add(Map<String, dynamic>.from(data)));
+          _snapshotController.add(Map<String, dynamic>.from(data)))
+
+      // 강제 퇴장
+      ..on(SocketEvents.kicked, (data) =>
+          _kickedController.add(Map<String, dynamic>.from(data as Map? ?? {})))
+
+      // 역할 변경 브로드캐스트
+      ..on(SocketEvents.roleChanged, (data) =>
+          _roleChangedController.add(Map<String, dynamic>.from(data as Map? ?? {})));
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -239,9 +271,37 @@ class SocketService {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
+  // 지수 백오프 재연결 스케줄러
+  // 2s → 4s → 8s → 16s → 30s(최대) 순으로 대기 후 재연결
+  // ─────────────────────────────────────────────────────────────────────────
+  void _scheduleReconnect() {
+    if (_reconnectScheduled) return;
+    if (_reconnectAttempts >= _maxReconnectAttempts) {
+      debugPrint('[Socket] 최대 재연결 횟수 초과 ($_maxReconnectAttempts회)');
+      return;
+    }
+    _reconnectScheduled = true;
+
+    final delayMs = math.min(
+      _baseDelayMs * math.pow(2, _reconnectAttempts).toInt(),
+      _maxDelayMs,
+    );
+    debugPrint('[Socket] 재연결 예약: ${delayMs}ms 후 (시도 ${_reconnectAttempts + 1}/$_maxReconnectAttempts)');
+
+    _reconnectTimer = Timer(Duration(milliseconds: delayMs), () {
+      _reconnectScheduled = false;
+      _reconnectAttempts++;
+      _socket?.connect();
+    });
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
   // 연결 해제
   // ─────────────────────────────────────────────────────────────────────────
   void disconnect() {
+    _reconnectTimer?.cancel();         // 예약된 재연결 취소
+    _reconnectAttempts  = 0;
+    _reconnectScheduled = false;
     _socket?.disconnect();
     _socket = null;
     _isConnected = false;
@@ -249,6 +309,7 @@ class SocketService {
   }
 
   void dispose() {
+    _reconnectTimer?.cancel();
     disconnect();
     _locationController.close();
     _memberJoinController.close();
@@ -257,5 +318,7 @@ class SocketService {
     _sosController.close();
     _snapshotController.close();
     _connectionController.close();
+    _kickedController.close();
+    _roleChangedController.close();
   }
 }
