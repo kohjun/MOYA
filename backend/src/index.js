@@ -10,6 +10,7 @@ import { createSocketServer } from './websocket/index.js';
 import authRoutes from './routes/auth.js';
 import sessionRoutes from './routes/sessions.js';
 import geofenceRoutes from './routes/geofences.js';
+import { startSessionCleaner } from './cron/sessionCleaner.js';
 
 dotenv.config();
 
@@ -19,7 +20,7 @@ const fastify = Fastify({
   },
 });
 
-// ─── 플러그인 등록 ─────────────────────────────────────────────────────────
+// 플러그인 등록
 await fastify.register(fastifyCors, {
   origin: process.env.ALLOWED_ORIGINS?.split(',') || true,
   credentials: true,
@@ -27,12 +28,12 @@ await fastify.register(fastifyCors, {
 
 await fastify.register(fastifyCookie);
 
-// ─── 라우트 등록 ───────────────────────────────────────────────────────────
+// 라우트 등록
 fastify.register(authRoutes,     { prefix: '/auth' });
 fastify.register(sessionRoutes,  { prefix: '/sessions' });
 fastify.register(geofenceRoutes, { prefix: '/sessions' });
 
-// ─── 헬스체크 ─────────────────────────────────────────────────────────────
+// 헬스체크
 fastify.get('/health', async () => {
   try {
     await dbQuery('SELECT 1');
@@ -42,7 +43,7 @@ fastify.get('/health', async () => {
   }
 });
 
-// ─── 에러 핸들러 ───────────────────────────────────────────────────────────
+// 에러 핸들러
 fastify.setErrorHandler((error, request, reply) => {
   fastify.log.error(error);
   reply.code(500).send({
@@ -51,9 +52,7 @@ fastify.setErrorHandler((error, request, reply) => {
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
 // 서버 시작
-// ─────────────────────────────────────────────────────────────────────────────
 const start = async () => {
   try {
     await connectRedis();
@@ -73,13 +72,16 @@ const start = async () => {
     // Fastify로 직접 리슨
     await fastify.listen({ port: PORT, host: HOST });
 
+    // 스케줄러 실행 (io 객체 전달)
+    startSessionCleaner(io);
+
     console.log(`
-╔══════════════════════════════════════════╗
-║   🗺️  Location Sharing Server Started     ║
-║   REST API : http://${HOST}:${PORT}       ║
-║   WebSocket: ws://${HOST}:${PORT}         ║
-║   Env      : ${process.env.NODE_ENV}                ║
-╚══════════════════════════════════════════╝
+============================================
+  Location Sharing Server Started
+  REST API : http://${HOST}:${PORT} 
+  WebSocket: ws://${HOST}:${PORT}
+  Env      : ${process.env.NODE_ENV}
+============================================
     `);
 
     const shutdown = async (signal) => {

@@ -5,7 +5,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:flutter_naver_map/flutter_naver_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -14,6 +14,10 @@ import '../../../core/services/socket_service.dart';
 import '../../../core/services/location_service.dart';
 import '../../../features/auth/data/auth_repository.dart';
 import '../../../features/home/data/session_repository.dart';
+import '../../../core/network/api_client.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
+import '../../../core/services/notification_service.dart';
+import '../../geofence/data/geofence_repository.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 멤버 실시간 위치 상태
@@ -143,6 +147,7 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
   StreamSubscription? _myPositionSub;
   StreamSubscription? _kickedSub;
   StreamSubscription? _roleChangedSub;
+  StreamSubscription? _sessionExpiredSub;
 
   Timer? _joinRetryTimer;
 
@@ -150,10 +155,15 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
   final Map<String, MemberState> _pendingUpdates = {};
   Timer? _markerFlushTimer;
 
+  // ★ 추가됨: 지오펜스 상태 관리를 위한 클래스 변수
+  final Set<String> _insideGeofences = {}; // 현재 내가 들어가 있는 지오펜스 ID 목록
+  List<dynamic> _currentGeofences = [];    // 현재 세션의 지오펜스 목록 (dynamic은 실제 Geofence 모델로 변경 권장)
+
   Future<void> _init() async {
     // 1. 세션 이름: sessionListProvider 캐시에서 조회
     final cachedSessions = _ref.read(sessionListProvider).valueOrNull ?? [];
     final cached = cachedSessions.where((s) => s.id == _sessionId);
+    
     if (cached.isNotEmpty) {
       state = state.copyWith(sessionName: cached.first.name);
     }
@@ -165,11 +175,23 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
       state = state.copyWith(hiddenMembers: Set.from(hiddenList));
     }
 
-    // 2. 소켓 이벤트 구독을 connect() 호출 전에 설정
+    // ★ 추가됨: 현재 세션의 지오펜스 목록 로드
+    // (이 부분은 실제 지오펜스 Provider나 Repository 호출 로직으로 수정하세요)
+    try {
+      _currentGeofences = await _ref.read(geofenceRepositoryProvider).getGeofences(_sessionId);
+    } catch (e) {
+      debugPrint('[Map] 지오펜스 로드 실패: $e');
+    }
 
-    // 강제 퇴장 수신
+    // 2. 소켓 이벤트 구독을 connect() 호출 전에 설정
     _kickedSub = _socket.onKicked.listen((data) {
       state = state.copyWith(wasKicked: true);
+    });
+
+    // ── 세션 만료 수신 ──
+    _sessionExpiredSub = _socket.onSessionExpired.listen((data) {
+      debugPrint('[Map] 세션 만료 수신: ${data['message']}');
+      state = state.copyWith(wasKicked: true); 
     });
 
     // 역할 변경 수신
@@ -181,7 +203,6 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
       if (userId == authUser?.id) {
         state = state.copyWith(myRole: role);
       }
-      // 멤버 목록에서도 역할 업데이트
       final updated = Map<String, MemberState>.from(state.members);
       if (updated.containsKey(userId)) {
         updated[userId] = updated[userId]!.copyWith(role: role);
@@ -189,7 +210,7 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
       }
     });
 
-    // 연결 상태: 연결 완료 시점에 session:join 전송
+    // 연결 상태
     _connectionSub = _socket.onConnectionChange.listen((connected) {
       state = state.copyWith(
         isConnected: connected,
@@ -209,18 +230,16 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
       state = state.copyWith(members: updated);
     });
 
-    // 다른 멤버 실시간 위치 — 50m 이상 이동 시에만 버퍼에 적재
+    // 다른 멤버 실시간 위치
     _locationSub = _socket.onLocationChanged.listen((payload) {
-      // pending 버퍼의 최신값 우선, 없으면 현재 state에서 조회
-      final current =
-          _pendingUpdates[payload.userId] ?? state.members[payload.userId];
+      final current = _pendingUpdates[payload.userId] ?? state.members[payload.userId];
 
       if (current != null && (current.lat != 0 || current.lng != 0)) {
         final dist = Geolocator.distanceBetween(
           current.lat, current.lng,
           payload.lat, payload.lng,
         );
-        if (dist < 50) return; // 50m 미만 이동은 무시
+        if (dist < 50) return; // 50m 미만 무시
       }
 
       _pendingUpdates[payload.userId] = current != null
@@ -283,7 +302,6 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
       });
     });
 
-    // session:snapshot: join 직후 서버가 전송하는 전체 상태
     _snapshotSub = _socket.onSnapshot.listen((data) {
       final members = data['members'] as List<dynamic>? ?? [];
       final updated = Map<String, MemberState>.from(state.members);
@@ -297,6 +315,7 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
         final lng            = (loc?['lng']         as num?)?.toDouble();
         final role           = m['role']            as String? ?? 'member';
         final sharingEnabled = m['sharing_enabled'] as bool?   ?? true;
+        
         updated[userId] = MemberState(
           userId:         userId,
           nickname:       nickname,
@@ -311,7 +330,6 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
       }
       state = state.copyWith(members: updated);
 
-      // 내 역할 및 공유 상태 초기화
       final authUser = _ref.read(authProvider).valueOrNull;
       if (authUser != null && updated.containsKey(authUser.id)) {
         final me = updated[authUser.id]!;
@@ -323,7 +341,6 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
     // 3. 소켓 연결
     try {
       await _socket.connect();
-      // 싱글톤이 이미 연결된 상태면 onConnectionChange 이벤트가 오지 않으므로 직접 반영
       if (_socket.isConnected) {
         state = state.copyWith(isConnected: true, hasEverConnected: true);
         _socket.joinSession(_sessionId);
@@ -332,7 +349,6 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
       debugPrint('[Map] Socket connect failed: $e');
     }
 
-    // session:join 재시도: 연결 후 30초 내 members가 비어있으면 자동 재시도
     _joinRetryTimer = Timer(const Duration(seconds: 30), () {
       if (mounted && state.members.isEmpty && state.isConnected) {
         _socket.joinSession(_sessionId);
@@ -344,16 +360,33 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
       await _gps.startTracking();
       _myPositionSub = _gps.positionStream.listen((pos) {
         state = state.copyWith(myPosition: pos);
+
+        final authUser = _ref.read(authProvider).valueOrNull;
+        if (authUser != null) {
+          final myId = authUser.id;
+          final currentMe = state.members[myId];
+          
+          if (currentMe != null) {
+            final updated = Map<String, MemberState>.from(state.members);
+            updated[myId] = currentMe.copyWith(
+              lat: pos.latitude,
+              lng: pos.longitude,
+              updatedAt: DateTime.now(),
+            );
+            state = state.copyWith(members: updated);
+          }
+        }
+
+        // ★ 추가됨: 위치가 갱신될 때마다 지오펜스 진입/이탈 체크
+        _checkGeofences(pos);
       });
     } catch (e) {
       debugPrint('[Map] GPS failed: $e');
     }
 
-    // 5. REST API로 초기 멤버 위치 로드 (snapshot 이전 또는 오프라인 멤버 대비)
+    // 5. REST API로 초기 멤버 위치 로드
     try {
-      final session = await _ref
-          .read(sessionRepositoryProvider)
-          .getSession(_sessionId);
+      final session = await _ref.read(sessionRepositoryProvider).getSession(_sessionId);
       final initialMembers = Map<String, MemberState>.from(state.members);
       for (final m in session.members) {
         if (!initialMembers.containsKey(m.userId)) {
@@ -372,7 +405,6 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
       }
       state = state.copyWith(members: initialMembers);
 
-      // 내 역할/공유 상태 설정 (snapshot이 아직 없을 때 대비)
       final authUser = _ref.read(authProvider).valueOrNull;
       if (authUser != null) {
         final myList = session.members.where((m) => m.userId == authUser.id).toList();
@@ -388,14 +420,83 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
     } catch (e) {
       debugPrint('[Map] Failed to load session members: $e');
     }
+
+    // 6. 백그라운드 서비스용 데이터 저장 및 시작
+    try {
+      await prefs.setString('bg_session_id', _sessionId);
+      final token = await ApiClient().getAccessToken(); 
+      if (token != null) {
+        await prefs.setString('bg_token', token);
+      }
+      final bgService = FlutterBackgroundService();
+      await bgService.startService();
+      debugPrint('[Background] 포그라운드 서비스 시작됨');
+    } catch (e) {
+      debugPrint('[Background] 서비스 시작 실패: $e');
+    }
   }
 
-  // ── 위치 공유 ON/OFF 토글 ────────────────────────────────────────────────
+  // ★ 추가됨: 지오펜스 진입/이탈 판정 및 알림 호출 함수
+  void _checkGeofences(Position myPos) {
+    if (_currentGeofences.isEmpty) return;
+
+    for (final gf in _currentGeofences) {
+      // gf 객체의 속성 이름(lat, lng, radius, id, name)은 실제 모델에 맞게 변경하세요.
+      double distance = Geolocator.distanceBetween(
+        myPos.latitude,
+        myPos.longitude,
+        gf.latitude, 
+        gf.longitude,
+      );
+
+      bool isCurrentlyInside = distance <= gf.radius;
+      bool wasInside = _insideGeofences.contains(gf.id);
+
+      if (isCurrentlyInside && !wasInside) {
+        _insideGeofences.add(gf.id);
+        // NotificationService().showNotification('지오펜스 진입', '${gf.name} 영역에 들어왔습니다!');
+        debugPrint('[Geofence] 진입: ${gf.name}');
+      } 
+      else if (!isCurrentlyInside && wasInside) {
+        _insideGeofences.remove(gf.id);
+        // NotificationService().showNotification('지오펜스 이탈', '${gf.name} 영역을 벗어났습니다.');
+        debugPrint('[Geofence] 이탈: ${gf.name}');
+      }
+    }
+  }
+
+  // ── 위치 공유 ON/OFF 토글 (즉각 갱신 로직 포함) ────────────────────────────────
   Future<void> toggleSharing(bool enabled) async {
     try {
       await _ref.read(sessionRepositoryProvider).toggleSharing(_sessionId, enabled);
       _gps.setSharingEnabled(enabled);
       state = state.copyWith(sharingEnabled: enabled);
+
+      if (enabled) {
+        final pos = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.high,
+        );
+        state = state.copyWith(myPosition: pos);
+
+        final authUser = _ref.read(authProvider).valueOrNull;
+        if (authUser != null) {
+          final myId = authUser.id;
+          final currentMe = state.members[myId];
+          
+          if (currentMe != null) {
+            final updated = Map<String, MemberState>.from(state.members);
+            updated[myId] = currentMe.copyWith(
+              lat: pos.latitude,
+              lng: pos.longitude,
+              status: 'moving',
+              updatedAt: DateTime.now(),
+            );
+            state = state.copyWith(members: updated);
+          }
+
+          _socket.sendLocationUpdate(_sessionId, pos.latitude, pos.longitude, 'moving');
+        }
+      }
     } catch (e) {
       debugPrint('[Map] toggleSharing failed: $e');
     }
@@ -445,9 +546,14 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
     _myPositionSub?.cancel();
     _kickedSub?.cancel();
     _roleChangedSub?.cancel();
+    _sessionExpiredSub?.cancel();
     _gps.stopTracking();
     _socket.disconnect();
+    // 방에서 나가거나 강퇴당하면 백그라운드 서비스를 종료합니다.
+    FlutterBackgroundService().invoke('stopService');
+    debugPrint('[Background] 포그라운드 서비스 종료 신호 발송');
     super.dispose();
+    
   }
 }
 
@@ -471,13 +577,13 @@ class MapScreen extends ConsumerStatefulWidget {
 }
 
 class _MapScreenState extends ConsumerState<MapScreen> {
-  GoogleMapController? _mapController;
+  NaverMapController? _mapController;
   bool _followMe = true;
 
   // ── 마커 캐시 ─────────────────────────────────────────────────────────────
   // members/sharingEnabled/hiddenMembers가 실제로 변경됐을 때만 마커를 재계산한다.
   // myPosition이 바뀌는 경우(GPS 업데이트)에는 재계산하지 않는다.
-  Set<Marker>               _cachedMarkers      = {};
+  Set<NMarker>              _cachedMarkers      = {};
   Map<String, MemberState>? _prevMembers;
   bool?                     _prevSharingEnabled;
   Set<String>?              _prevHiddenMembers;
@@ -511,13 +617,14 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     // 내 위치 따라가기
     final myPos = mapState.myPosition;
     if (_followMe && myPos != null && _mapController != null) {
-      _mapController!.animateCamera(
-        CameraUpdate.newLatLng(LatLng(myPos.latitude, myPos.longitude)),
+      _mapController!.updateCamera(
+        NCameraUpdate.scrollAndZoomTo(
+          target: NLatLng(myPos.latitude, myPos.longitude),
+        )..setAnimation(animation: NCameraAnimation.easing)
       );
     }
 
     // 마커 캐시: 마커에 영향 주는 상태가 실제로 바뀐 경우에만 재계산
-    // identical()로 Map/Set 참조를 비교 → copyWith가 새 객체를 만들 때만 true
     final myUserId = authUser?.id;
     if (!identical(_prevMembers,      mapState.members)      ||
         _prevSharingEnabled          != mapState.sharingEnabled ||
@@ -527,33 +634,47 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       _prevSharingEnabled = mapState.sharingEnabled;
       _prevHiddenMembers  = mapState.hiddenMembers;
       _prevMyUserId       = myUserId;
+      
       _cachedMarkers = _buildMarkers(
         mapState.members,
         myUserId,
         mapState.sharingEnabled,
         mapState.hiddenMembers,
       );
+
+      // 네이버 지도는 오버레이를 컨트롤러를 통해 직접 갱신해야 합니다.
+      if (_mapController != null) {
+        _mapController!.clearOverlays();
+        _mapController!.addOverlayAll(_cachedMarkers);
+      }
     }
 
     return Scaffold(
       body: Stack(
         children: [
-          // ── Google Maps ───────────────────────────────────────────────────
-          GoogleMap(
-            initialCameraPosition: CameraPosition(
-              target: myPos != null
-                  ? LatLng(myPos.latitude, myPos.longitude)
-                  : const LatLng(37.5665, 126.9780),
-              zoom: 14.0,
-              tilt: 0.0,
+          // ── Naver Map ───────────────────────────────────────────────────
+          NaverMap(
+            options: NaverMapViewOptions(
+              initialCameraPosition: NCameraPosition(
+                target: myPos != null 
+                    ? NLatLng(myPos.latitude, myPos.longitude) 
+                    : const NLatLng(37.5665, 126.9780),
+                zoom: 14.0,
+              ),
+              locationButtonEnable: false,
+              zoomGesturesEnable: true,
             ),
-            onMapCreated: (ctrl) => _mapController = ctrl,
-            markers: _cachedMarkers,
-            myLocationEnabled: true,
-            myLocationButtonEnabled: false,
-            zoomControlsEnabled: false,
-            buildingsEnabled: false,
-            onCameraMoveStarted: () => setState(() => _followMe = false),
+            onMapReady: (controller) {
+              _mapController = controller;
+              if (_cachedMarkers.isNotEmpty) {
+                _mapController!.addOverlayAll(_cachedMarkers);
+              }
+            },
+            onCameraChange: (reason, animated) {
+              if (reason == NCameraUpdateReason.gesture) {
+                setState(() => _followMe = false);
+              }
+            },
           ),
 
           // ── 상단 앱바 ─────────────────────────────────────────────────────
@@ -590,10 +711,10 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                   onPressed: () {
                     setState(() => _followMe = true);
                     if (myPos != null) {
-                      _mapController?.animateCamera(
-                        CameraUpdate.newLatLng(
-                          LatLng(myPos.latitude, myPos.longitude),
-                        ),
+                      _mapController?.updateCamera(
+                        NCameraUpdate.scrollAndZoomTo(
+                          target: NLatLng(myPos.latitude, myPos.longitude),
+                        )..setAnimation(animation: NCameraAnimation.easing),
                       );
                     }
                   },
@@ -655,11 +776,11 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               onMemberTap: (member) {
                 if (member.lat == 0 && member.lng == 0) return;
                 setState(() => _followMe = false);
-                _mapController?.animateCamera(
-                  CameraUpdate.newLatLngZoom(
-                    LatLng(member.lat, member.lng),
-                    15,
-                  ),
+                _mapController?.updateCamera(
+                  NCameraUpdate.scrollAndZoomTo(
+                    target: NLatLng(member.lat, member.lng),
+                    zoom: 15,
+                  )..setAnimation(animation: NCameraAnimation.easing),
                 );
               },
               onHideToggle: (userId) => ref
@@ -672,31 +793,53 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     );
   }
 
-  Set<Marker> _buildMarkers(
+  // ─────────────────────────────────────────────────────────────────────────────
+// (MapScreen 클래스 내부 교체할 코드 영역)
+// ─────────────────────────────────────────────────────────────────────────────
+
+  Set<NMarker> _buildMarkers(
     Map<String, MemberState> members,
     String? myUserId,
     bool sharingEnabled,
     Set<String> hiddenMembers,
   ) {
-    final markers = <Marker>{};
+    final markers = <NMarker>{};
     for (final m in members.values) {
       if (m.lat == 0 && m.lng == 0) continue;
+      
       final isMe = m.userId == myUserId;
       if (isMe && !sharingEnabled) continue;   // 공유 OFF 시 내 마커 숨김
       if (hiddenMembers.contains(m.userId)) continue; // 숨긴 멤버 제외
-      markers.add(
-        Marker(
-          markerId:   MarkerId(m.userId),
-          position:   LatLng(m.lat, m.lng),
-          icon:       BitmapDescriptor.defaultMarkerWithHue(
-            isMe ? BitmapDescriptor.hueRed : BitmapDescriptor.hueBlue,
+
+      // 메인 캡션: 이름 (나)
+      final nameCaption = isMe ? '${m.nickname} (나)' : m.nickname;
+      
+      final marker = NMarker(
+        id: m.userId,
+        position: NLatLng(m.lat, m.lng),
+      )
+        // 기본 마커 핀 색상 (나는 파란색, 다른 사람은 빨간색)
+        ..setIconTintColor(isMe ? const Color(0xFF2196F3) : Colors.redAccent)
+        // 이름 표시
+        ..setCaption(
+          NOverlayCaption(
+            text: nameCaption,
+            textSize: 14,
+            color: isMe ? const Color(0xFF2196F3) : Colors.black87,
+            haloColor: Colors.white, // 흰색 테두리로 가독성 확보
           ),
-          infoWindow: InfoWindow(
-            title:   '${m.nickname}${isMe ? ' (나)' : ''}',
-            snippet: _markerSnippet(m),
+        )
+        // 상태 및 배터리 표시
+        ..setSubCaption(
+          NOverlayCaption(
+            text: _markerSnippet(m),
+            textSize: 12,
+            color: Colors.grey[700]!,
+            haloColor: Colors.white,
           ),
-        ),
-      );
+        );
+
+      markers.add(marker);
     }
     return markers;
   }
@@ -704,29 +847,32 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   String _markerSnippet(MemberState m) {
     final parts = <String>[];
     if (m.status == 'moving') {
-      parts.add('이동 중');
+      parts.add('이동중');
     } else {
       parts.add('정지');
     }
-    if (m.battery != null) parts.add('배터리 ${m.battery}%');
-    return parts.join(' · ');
+    if (m.battery != null) parts.add('배터리(${m.battery}%)');
+    return parts.join(' '); // "이동중 배터리(80%)" 형태로 출력
   }
 
   void _fitAllMembers(Map<String, MemberState> members, Position? myPos) {
     if (_mapController == null) return;
     setState(() => _followMe = false);
 
-    final points = <LatLng>[
-      if (myPos != null) LatLng(myPos.latitude, myPos.longitude),
+    final points = <NLatLng>[
+      if (myPos != null) NLatLng(myPos.latitude, myPos.longitude),
       ...members.values
           .where((m) => m.lat != 0 || m.lng != 0)
-          .map((m) => LatLng(m.lat, m.lng)),
+          .map((m) => NLatLng(m.lat, m.lng)),
     ];
 
     if (points.isEmpty) return;
     if (points.length == 1) {
-      _mapController!.animateCamera(
-        CameraUpdate.newLatLngZoom(points.first, 15),
+      _mapController!.updateCamera(
+        NCameraUpdate.scrollAndZoomTo(
+          target: points.first, 
+          zoom: 15,
+        )..setAnimation(animation: NCameraAnimation.easing),
       );
       return;
     }
@@ -743,14 +889,14 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       maxLng = math.max(maxLng, p.longitude);
     }
 
-    _mapController!.animateCamera(
-      CameraUpdate.newLatLngBounds(
-        LatLngBounds(
-          southwest: LatLng(minLat, minLng),
-          northeast: LatLng(maxLat, maxLng),
-        ),
-        80,
-      ),
+    final bounds = NLatLngBounds(
+      southWest: NLatLng(minLat, minLng),
+      northEast: NLatLng(maxLat, maxLng),
+    );
+
+    _mapController!.updateCamera(
+      NCameraUpdate.fitBounds(bounds, padding: const EdgeInsets.all(80))
+        ..setAnimation(animation: NCameraAnimation.easing),
     );
   }
 

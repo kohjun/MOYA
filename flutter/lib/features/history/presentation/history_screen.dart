@@ -3,7 +3,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:flutter_naver_map/flutter_naver_map.dart';
 import 'package:intl/intl.dart';
 
 import '../data/history_repository.dart';
@@ -39,7 +39,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen>
   List<TrackPoint> _track = [];
   bool _loading = false;
 
-  GoogleMapController? _mapCtrl;
+  NaverMapController? _mapCtrl;
 
   // ── 재생 ──────────────────────────────────────────────────────────────────
   bool _playing = false;
@@ -79,7 +79,6 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen>
       final myId = ref.read(authProvider).valueOrNull?.id;
       setState(() {
         _members = session.members;
-        // 기본 선택: 내 아이디 → 없으면 첫 멤버
         _selectedUserId = _members
                 .where((m) => m.userId == myId)
                 .firstOrNull
@@ -106,11 +105,44 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen>
           );
       if (!mounted) return;
       setState(() { _track = points; _loading = false; });
+      _updateOverlays();
       _fitPolyline();
     } catch (e) {
       if (mounted) setState(() => _loading = false);
       _showError('경로 로드 실패: $e');
     }
+  }
+
+  // ── 오버레이 업데이트 (경로선 및 마커) ──────────────────────────────────────
+  void _updateOverlays() {
+    if (_mapCtrl == null) return;
+    _mapCtrl!.clearOverlays();
+
+    if (_track.isEmpty) return;
+
+    final overlays = <NAddableOverlay>{};
+    final points = _track.map((p) => NLatLng(p.lat, p.lng)).toList();
+
+    if (points.length >= 2) {
+      overlays.add(NPolylineOverlay(
+        id: 'track_line',
+        coords: points,
+        color: const Color(0xFF2196F3),
+        width: 4,
+        lineCap: NLineCap.round,
+        lineJoin: NLineJoin.round,
+      ));
+    }
+
+    final p = _track[_playing ? _playIndex : _track.length - 1];
+    overlays.add(NMarker(
+      id: 'playhead',
+      position: NLatLng(p.lat, p.lng),
+    )
+      ..setCaption(NOverlayCaption(text: _selectedNickname()))
+      ..setSubCaption(NOverlayCaption(text: _formatTime(p.recordedAt))));
+
+    _mapCtrl!.addOverlayAll(overlays);
   }
 
   // ── 지도 범위 조정 ─────────────────────────────────────────────────────────
@@ -124,14 +156,15 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen>
       if (p.lng < minLng) minLng = p.lng;
       if (p.lng > maxLng) maxLng = p.lng;
     }
-    _mapCtrl!.animateCamera(
-      CameraUpdate.newLatLngBounds(
-        LatLngBounds(
-          southwest: LatLng(minLat, minLng),
-          northeast: LatLng(maxLat, maxLng),
-        ),
-        60,
-      ),
+
+    final bounds = NLatLngBounds(
+      southWest: NLatLng(minLat, minLng),
+      northEast: NLatLng(maxLat, maxLng),
+    );
+
+    _mapCtrl!.updateCamera(
+      NCameraUpdate.fitBounds(bounds, padding: const EdgeInsets.all(60))
+        ..setAnimation(animation: NCameraAnimation.easing),
     );
   }
 
@@ -154,16 +187,22 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen>
         return;
       }
       setState(() => _playIndex++);
+      _updateOverlays();
+      
       final p = _track[_playIndex];
-      _mapCtrl?.animateCamera(
-        CameraUpdate.newLatLng(LatLng(p.lat, p.lng)),
+      _mapCtrl?.updateCamera(
+        NCameraUpdate.scrollAndZoomTo(target: NLatLng(p.lat, p.lng))
+          ..setAnimation(animation: NCameraAnimation.linear),
       );
     });
   }
 
   void _stopPlay() {
     _playTimer?.cancel();
-    if (mounted) setState(() => _playing = false);
+    if (mounted) {
+      setState(() => _playing = false);
+      _updateOverlays();
+    }
   }
 
   // ── 날짜 preset 변경 ───────────────────────────────────────────────────────
@@ -204,36 +243,6 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen>
   // ─────────────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
-    final polylinePoints = _track
-        .map((p) => LatLng(p.lat, p.lng))
-        .toList();
-
-    // 재생 마커
-    final Set<Marker> markers = {};
-    if (_track.isNotEmpty) {
-      final p = _track[_playing ? _playIndex : _track.length - 1];
-      markers.add(Marker(
-        markerId: const MarkerId('playhead'),
-        position: LatLng(p.lat, p.lng),
-        infoWindow: InfoWindow(
-          title: _selectedNickname(),
-          snippet: _formatTime(p.recordedAt),
-        ),
-      ));
-    }
-
-    final Set<Polyline> polylines = {};
-    if (polylinePoints.length >= 2) {
-      polylines.add(Polyline(
-        polylineId: const PolylineId('track'),
-        points: polylinePoints,
-        color: const Color(0xFF2196F3),
-        width: 4,
-        startCap: Cap.roundCap,
-        endCap: Cap.roundCap,
-      ));
-    }
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('위치 기록'),
@@ -267,19 +276,22 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen>
             flex: 5,
             child: Stack(
               children: [
-                GoogleMap(
-                  initialCameraPosition: const CameraPosition(
-                    target: LatLng(37.5665, 126.9780),
-                    zoom: 14,
+                NaverMap(
+                  options: const NaverMapViewOptions(
+                    initialCameraPosition: NCameraPosition(
+                      target: NLatLng(37.5665, 126.9780),
+                      zoom: 14,
+                    ),
+                    zoomGesturesEnable: true,
+                    locationButtonEnable: false,
                   ),
-                  onMapCreated: (ctrl) {
+                  onMapReady: (ctrl) {
                     _mapCtrl = ctrl;
-                    if (_track.isNotEmpty) _fitPolyline();
+                    if (_track.isNotEmpty) {
+                      _updateOverlays();
+                      _fitPolyline();
+                    }
                   },
-                  polylines: polylines,
-                  markers: markers,
-                  zoomControlsEnabled: false,
-                  myLocationButtonEnabled: false,
                 ),
                 if (_loading)
                   const Center(child: CircularProgressIndicator()),
@@ -303,9 +315,12 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen>
               onTap:         (i) {
                 _stopPlay();
                 setState(() => _playIndex = i);
+                _updateOverlays();
+                
                 final p = _track[i];
-                _mapCtrl?.animateCamera(
-                  CameraUpdate.newLatLng(LatLng(p.lat, p.lng)),
+                _mapCtrl?.updateCamera(
+                  NCameraUpdate.scrollAndZoomTo(target: NLatLng(p.lat, p.lng))
+                    ..setAnimation(animation: NCameraAnimation.easing),
                 );
               },
             ),
@@ -358,7 +373,6 @@ class _FilterPanel extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // 멤버 드롭다운
           DropdownButtonFormField<String>(
             initialValue: selectedUserId,
             decoration: const InputDecoration(
@@ -377,7 +391,6 @@ class _FilterPanel extends StatelessWidget {
           ),
           const SizedBox(height: 8),
 
-          // 날짜 범위 버튼
           Row(
             children: [
               _PresetBtn(
@@ -476,7 +489,6 @@ class _TrackTimeline extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
             child: Row(
               children: [
-                // 타임라인 dot
                 Column(
                   children: [
                     Container(
@@ -499,7 +511,6 @@ class _TrackTimeline extends StatelessWidget {
                 ),
                 const SizedBox(width: 12),
 
-                // 시각
                 Text(
                   DateFormat('HH:mm:ss').format(p.recordedAt.toLocal()),
                   style: const TextStyle(
@@ -510,7 +521,6 @@ class _TrackTimeline extends StatelessWidget {
                 ),
                 const SizedBox(width: 12),
 
-                // 속도
                 if (p.speed != null)
                   Text(
                     '${(p.speed! * 3.6).toStringAsFixed(1)} km/h',
@@ -518,7 +528,6 @@ class _TrackTimeline extends StatelessWidget {
                   ),
                 const Spacer(),
 
-                // 상태 뱃지
                 Container(
                   padding: const EdgeInsets.symmetric(
                       horizontal: 8, vertical: 2),

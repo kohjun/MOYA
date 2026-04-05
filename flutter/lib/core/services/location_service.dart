@@ -138,24 +138,24 @@ class GpsLocationService {
   // ─────────────────────────────────────────────────────────────────────────
   Future<void> _sendToSocket(Position position) async {
     if (!_sharingEnabled) return; // 공유 OFF 시 전송 중단
-    int? batteryLevel;
-    try {
-      batteryLevel = await _battery.batteryLevel;
-    } catch (_) {}
+    // int? batteryLevel;
+    // try {
+    //   batteryLevel = await _battery.batteryLevel;
+    // } catch (_) {}
 
-    final status = _isMoving ? 'moving' : 'stopped';
+    // final status = _isMoving ? 'moving' : 'stopped';
 
-    SocketService().sendLocation(
-      lat:      position.latitude,
-      lng:      position.longitude,
-      accuracy: position.accuracy,
-      altitude: position.altitude,
-      speed:    position.speed.isNaN ? null : position.speed,
-      heading:  position.heading.isNaN ? null : position.heading,
-      source:   'gps',
-      battery:  batteryLevel,
-      status:   status,
-    );
+    // SocketService().sendLocation(
+    //   lat:      position.latitude,
+    //   lng:      position.longitude,
+    //   accuracy: position.accuracy,
+    //   altitude: position.altitude,
+    //   speed:    position.speed.isNaN ? null : position.speed,
+    //   heading:  position.heading.isNaN ? null : position.heading,
+    //   source:   'gps',
+    //   battery:  batteryLevel,
+    //   status:   status,
+    // );
   }
 
   // ─────────────────────────────────────────────────────────────────────────

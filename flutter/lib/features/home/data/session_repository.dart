@@ -59,6 +59,7 @@ class Session {
   final int memberCount;
   final List<SessionMember> members;
   final DateTime createdAt;
+  final DateTime? expiresAt; // 추가됨: 세션 만료 시간
 
   const Session({
     required this.id,
@@ -68,15 +69,22 @@ class Session {
     required this.memberCount,
     required this.members,
     required this.createdAt,
+    this.expiresAt,
   });
 
   factory Session.fromMap(Map<String, dynamic> m) {
     final rawMembers = m['members'] as List<dynamic>? ?? [];
+    
+    DateTime? parsedExpiresAt;
+    if (m['expires_at'] != null) {
+      parsedExpiresAt = DateTime.tryParse(m['expires_at'].toString());
+    }
+
     return Session(
-      id:          m['id']           as String,
-      name:        m['name']         as String,
+      id:          m['id']          as String,
+      name:        m['name']        as String,
       code:        (m['session_code'] ?? m['code']) as String? ?? '',
-      isHost:      m['is_host']      as bool? ?? false,
+      isHost:      m['is_host']     as bool? ?? false,
       memberCount: int.tryParse(m['member_count'].toString()) ?? rawMembers.length,
       members:     rawMembers
           .whereType<Map<String, dynamic>>()
@@ -84,6 +92,7 @@ class Session {
           .toList(),
       createdAt: DateTime.tryParse(m['created_at'] as String? ?? '') ??
           DateTime.now(),
+      expiresAt: parsedExpiresAt,
     );
   }
 }
@@ -104,8 +113,16 @@ class SessionRepository {
         .toList();
   }
 
-  Future<Session> createSession(String name) async {
-    final res = await _api.post('/sessions', data: {'name': name});
+  // ★ 수정됨: maxMembers 파라미터를 추가로 받고 서버(data)로 넘겨줌
+  Future<Session> createSession(String name, int durationHours, int maxMembers) async {
+    final res = await _api.post(
+      '/sessions', 
+      data: {
+        'name': name,
+        'durationHours': durationHours, 
+        'maxMembers': maxMembers, // 서버로 최대 인원수 전달
+      }
+    );
     return Session.fromMap(res.data['session'] as Map<String, dynamic>);
   }
 
@@ -132,6 +149,7 @@ class SessionRepository {
         memberCount: members.length,
         members:     members,
         createdAt:   DateTime.now(),
+        expiresAt:   null,
       );
     } catch (e) {
       debugPrint('[SessionRepository] getSession($id) error: $e');
@@ -143,6 +161,7 @@ class SessionRepository {
         memberCount: 0,
         members:     [],
         createdAt:   DateTime.now(),
+        expiresAt:   null,
       );
     }
   }
@@ -190,10 +209,23 @@ class SessionListNotifier extends AsyncNotifier<List<Session>> {
     state = await AsyncValue.guard(_fetch);
   }
 
-  Future<String> createSession(String name) async {
-    final session = await ref.read(sessionRepositoryProvider).createSession(name);
-    await refresh();
-    return session.code;
+  // ★ 수정됨: _repository 대신 ref.read()를 사용하고, 반환된 session 객체에서 code를 뽑아냄
+  Future<String> createSession(String name, {int durationHours = 1, int maxMembers = 3}) async {
+    try {
+      final session = await ref.read(sessionRepositoryProvider).createSession(
+        name,
+        durationHours,
+        maxMembers, 
+      );
+      
+      // 세션 생성 후 목록 새로고침
+      await refresh();
+      
+      // 생성된 세션 객체에서 초대 코드만 반환
+      return session.code; 
+    } catch (e) {
+      rethrow;
+    }
   }
 
   Future<void> joinSession(String code) async {

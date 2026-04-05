@@ -75,6 +75,8 @@ class SocketEvents {
   static const kicked          = 'kicked';
   static const roleChanged     = 'role_changed';
   static const error           = 'error';
+  // 추가됨: 세션 만료 이벤트
+  static const sessionExpired  = 'sessionExpired'; 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -86,8 +88,8 @@ class SocketService {
   String? _currentSessionId;
 
   // ── 지수 백오프 재연결 ────────────────────────────────────────────────────
-  int    _reconnectAttempts   = 0;
-  bool   _reconnectScheduled  = false;
+  int    _reconnectAttempts  = 0;
+  bool   _reconnectScheduled = false;
   Timer? _reconnectTimer;
   static const _baseDelayMs      = 3000;  // 초기 대기 시간: 3s
   static const _maxDelayMs       = 30000; // 최대 대기 시간: 30s
@@ -103,16 +105,23 @@ class SocketService {
   final _connectionController  = StreamController<bool>.broadcast();
   final _kickedController      = StreamController<Map<String, dynamic>>.broadcast();
   final _roleChangedController = StreamController<Map<String, dynamic>>.broadcast();
+  
+  // 추가됨: 세션 만료 스트림 컨트롤러
+  final _sessionExpiredController = StreamController<Map<String, dynamic>>.broadcast();
 
-  Stream<LocationPayload>         get onLocationChanged => _locationController.stream;
-  Stream<Map<String, dynamic>>    get onMemberJoined    => _memberJoinController.stream;
-  Stream<Map<String, dynamic>>    get onMemberLeft      => _memberLeftController.stream;
-  Stream<Map<String, dynamic>>    get onStatusChanged   => _statusController.stream;
-  Stream<Map<String, dynamic>>    get onSosAlert        => _sosController.stream;
-  Stream<Map<String, dynamic>>    get onSnapshot        => _snapshotController.stream;
-  Stream<bool>                    get onConnectionChange => _connectionController.stream;
-  Stream<Map<String, dynamic>>    get onKicked          => _kickedController.stream;
-  Stream<Map<String, dynamic>>    get onRoleChanged     => _roleChangedController.stream;
+  Stream<LocationPayload>      get onLocationChanged => _locationController.stream;
+  Stream<Map<String, dynamic>> get onMemberJoined    => _memberJoinController.stream;
+  Stream<Map<String, dynamic>> get onMemberLeft      => _memberLeftController.stream;
+  Stream<Map<String, dynamic>> get onStatusChanged   => _statusController.stream;
+  Stream<Map<String, dynamic>> get onSosAlert        => _sosController.stream;
+  Stream<Map<String, dynamic>> get onSnapshot        => _snapshotController.stream;
+  Stream<bool>                 get onConnectionChange => _connectionController.stream;
+  Stream<Map<String, dynamic>> get onKicked          => _kickedController.stream;
+  Stream<Map<String, dynamic>> get onRoleChanged     => _roleChangedController.stream;
+  
+  // 추가됨: 세션 만료 스트림 getter
+  Stream<Map<String, dynamic>> get onSessionExpired  => _sessionExpiredController.stream;
+
   bool get isConnected => _isConnected;
 
   static final SocketService _instance = SocketService._internal();
@@ -204,8 +213,14 @@ class SocketService {
 
       // 역할 변경 브로드캐스트
       ..on(SocketEvents.roleChanged, (data) =>
-          _roleChangedController.add(Map<String, dynamic>.from(data as Map? ?? {})));
+          _roleChangedController.add(Map<String, dynamic>.from(data as Map? ?? {})))
+          
+      // 추가됨: 세션 만료 수신
+      ..on(SocketEvents.sessionExpired, (data) =>
+          _sessionExpiredController.add(Map<String, dynamic>.from(data as Map? ?? {})));
   }
+
+  // ... (아래 joinSession, sendLocation 등 나머지 코드는 기존과 완벽히 동일하므로 생략하지 않고 그대로 유지하세요) ...
 
   // ─────────────────────────────────────────────────────────────────────────
   // 세션 참가
@@ -270,9 +285,17 @@ class SocketService {
     });
   }
 
+  void sendLocationUpdate(String sessionId, double lat, double lng, String status) {
+    _socket?.emit(SocketEvents.locationUpdate, {
+      'sessionId': sessionId,
+      'lat': lat,
+      'lng': lng,
+      'status': status,
+    });
+  }
+
   // ─────────────────────────────────────────────────────────────────────────
   // 지수 백오프 재연결 스케줄러
-  // 2s → 4s → 8s → 16s → 30s(최대) 순으로 대기 후 재연결
   // ─────────────────────────────────────────────────────────────────────────
   void _scheduleReconnect() {
     if (_reconnectScheduled) return;
@@ -299,7 +322,7 @@ class SocketService {
   // 연결 해제
   // ─────────────────────────────────────────────────────────────────────────
   void disconnect() {
-    _reconnectTimer?.cancel();         // 예약된 재연결 취소
+    _reconnectTimer?.cancel();
     _reconnectAttempts  = 0;
     _reconnectScheduled = false;
     _socket?.disconnect();
@@ -320,5 +343,6 @@ class SocketService {
     _connectionController.close();
     _kickedController.close();
     _roleChangedController.close();
+    _sessionExpiredController.close(); // 추가됨
   }
 }

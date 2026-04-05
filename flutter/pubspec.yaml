@@ -20,7 +20,8 @@ dependencies:
   socket_io_client: ^2.0.3+1       # WebSocket (Socket.IO)
 
   # 지도
-  google_maps_flutter: ^2.6.1      # Google Maps
+  #google_maps_flutter: ^2.6.1      # Google Maps
+  flutter_naver_map: ^1.2.2      # Naver Map
   flutter_polyline_points: ^2.0.0  # 경로 폴리라인
 
   # 위치
@@ -40,7 +41,7 @@ dependencies:
   # Firebase / FCM
   firebase_core: ^3.0.0
   firebase_messaging: ^15.0.0
-  flutter_local_notifications: ^17.0.0
+  flutter_local_notifications: ^21.0.0
 
   # 배터리
   battery_plus: ^6.0.1
@@ -50,6 +51,7 @@ dependencies:
   uuid: ^4.4.0
   freezed_annotation: ^2.4.1
   json_annotation: ^4.9.0
+  flutter_background_service: ^5.1.0
 
 dev_dependencies:
   flutter_test:

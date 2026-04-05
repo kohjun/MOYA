@@ -12,11 +12,36 @@ import '../data/session_repository.dart';
 class HomeScreen extends ConsumerWidget {
   const HomeScreen({super.key});
 
+  // ── 이미 참여 중인 세션이 있는지 확인하는 헬퍼 메서드 ────────────────────────
+  bool _hasActiveSession(BuildContext context, WidgetRef ref) {
+    final sessions = ref.read(sessionListProvider).valueOrNull ?? [];
+    if (sessions.isNotEmpty) {
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('입장 불가'),
+          content: const Text('이미 참여 중인 세션이 있습니다. 기존 세션을 완전히 종료하거나 나간 후 새로운 세션에 참여해주세요.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('확인'),
+            ),
+          ],
+        ),
+      );
+      return true; // 활성 세션 있음
+    }
+    return false; // 활성 세션 없음
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final authState    = ref.watch(authProvider);
     final sessionState = ref.watch(sessionListProvider);
     final user         = authState.valueOrNull;
+
+    // 참여 중인 세션이 있는지 여부 (FAB 숨김 처리에 사용)
+    final hasSession = (sessionState.valueOrNull?.isNotEmpty ?? false);
 
     return Scaffold(
       appBar: AppBar(
@@ -71,71 +96,158 @@ class HomeScreen extends ConsumerWidget {
               ),
       ),
 
-      floatingActionButton: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          FloatingActionButton.extended(
-            heroTag: 'join',
-            onPressed: () => _showJoinDialog(context, ref),
-            icon: const Icon(Icons.group_add),
-            label: const Text('코드로 참가'),
-            backgroundColor: Colors.white,
-            foregroundColor: const Color(0xFF2196F3),
-          ),
-          const SizedBox(height: 12),
-          FloatingActionButton.extended(
-            heroTag: 'create',
-            onPressed: () => _showCreateDialog(context, ref),
-            icon: const Icon(Icons.add),
-            label: const Text('세션 생성'),
-          ),
-        ],
-      ),
+      // 1인 1방 규칙: 세션이 이미 존재하면 플로팅 버튼 숨김
+      floatingActionButton: hasSession 
+          ? null 
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                FloatingActionButton.extended(
+                  heroTag: 'join',
+                  onPressed: () => _showJoinDialog(context, ref),
+                  icon: const Icon(Icons.group_add),
+                  label: const Text('코드로 참가'),
+                  backgroundColor: Colors.white,
+                  foregroundColor: const Color(0xFF2196F3),
+                ),
+                const SizedBox(height: 12),
+                FloatingActionButton.extended(
+                  heroTag: 'create',
+                  onPressed: () => _showCreateDialog(context, ref),
+                  icon: const Icon(Icons.add),
+                  label: const Text('세션 생성'),
+                ),
+              ],
+            ),
     );
   }
 
-  // ── 세션 생성 다이얼로그 ──────────────────────────────────────────────────
+  // ── 세션 생성 다이얼로그 (유지 시간 선택 추가) ──────────────────────────────
   void _showCreateDialog(BuildContext context, WidgetRef ref) {
+    if (_hasActiveSession(context, ref)) return;
+
     final ctrl = TextEditingController();
+    int selectedHours = 1;
+    double maxMembers = 3; // 최대 인원 기본값 3명
+
+    final Map<int, String> durationOptions = {
+      1: '1시간 (기본)',
+      6: '6시간',
+      24: '24시간',
+      72: '3일',
+      120: '5일',
+      168: '7일',
+    };
+
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('새 세션 생성'),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          maxLength: 30,
-          decoration: const InputDecoration(
-            labelText: '세션 이름',
-            hintText: '예: 가족 나들이',
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('취소'),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              final name = ctrl.text.trim();
-              if (name.isEmpty) return;
-              Navigator.pop(ctx);
-              try {
-                final code = await ref.read(sessionListProvider.notifier).createSession(name);
-                if (context.mounted) {
-                  _showSessionCodeDialog(context, code);
-                }
-              } catch (e) {
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('세션 생성 실패: $e'), backgroundColor: Colors.red),
-                  );
-                }
-              }
-            },
-            child: const Text('생성'),
-          ),
-        ],
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          return AlertDialog(
+            title: const Text('새 세션 생성'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  TextField(
+                    controller: ctrl,
+                    autofocus: true,
+                    maxLength: 30,
+                    decoration: const InputDecoration(
+                      labelText: '세션 이름',
+                      hintText: '예: 가족 나들이',
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  DropdownButtonFormField<int>(
+                    initialValue: selectedHours,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: '세션 유지 시간',
+                    ),
+                    items: durationOptions.entries.map((entry) {
+                      return DropdownMenuItem<int>(
+                        value: entry.key,
+                        child: Text(entry.value),
+                      );
+                    }).toList(),
+                    onChanged: (int? newValue) {
+                      if (newValue != null) {
+                        setDialogState(() {
+                          selectedHours = newValue;
+                        });
+                      }
+                    },
+                  ),
+                  const SizedBox(height: 24),
+                  
+                  // 최대 인원 설정
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('최대 인원', style: TextStyle(fontWeight: FontWeight.bold)),
+                      Text(
+                        '${maxMembers.toInt()}명',
+                        style: const TextStyle(color: Colors.blue, fontWeight: FontWeight.bold),
+                      ),
+                    ],
+                  ),
+                  Slider(
+                    value: maxMembers,
+                    min: 3,
+                    max: 20,
+                    divisions: 17, // 3부터 20까지 17칸
+                    label: '${maxMembers.toInt()}명',
+                    onChanged: (value) {
+                      setDialogState(() {
+                        maxMembers = value;
+                      });
+                    },
+                  ),
+                  const Text(
+                    '최소 3명에서 최대 20명까지 설정할 수 있습니다.',
+                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('취소'),
+              ),
+              ElevatedButton(
+                onPressed: () async {
+                  final name = ctrl.text.trim();
+                  if (name.isEmpty) return;
+                  Navigator.pop(ctx);
+                  
+                  try {
+                    // 주의: sessionListProvider의 createSession 메서드가 
+                    // durationHours와 maxMembers 인자를 받을 수 있도록 수정하셔야 합니다.
+                    final code = await ref.read(sessionListProvider.notifier).createSession(
+                      name, 
+                      durationHours: selectedHours,
+                      maxMembers: maxMembers.toInt(), // ★ 추가됨
+                    );
+                    
+                    if (context.mounted) {
+                      _showSessionCodeDialog(context, code);
+                    }
+                  } catch (e) {
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('세션 생성 실패: $e'), backgroundColor: Colors.red),
+                      );
+                    }
+                  }
+                },
+                child: const Text('생성'),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -186,6 +298,8 @@ class HomeScreen extends ConsumerWidget {
 
   // ── 초대 코드로 참가 다이얼로그 ──────────────────────────────────────────
   void _showJoinDialog(BuildContext context, WidgetRef ref) {
+    if (_hasActiveSession(context, ref)) return;
+
     final ctrl = TextEditingController();
     showDialog(
       context: context,
@@ -294,25 +408,61 @@ class HomeScreen extends ConsumerWidget {
 // 세션 카드
 // ─────────────────────────────────────────────────────────────────────────────
 
-class _SessionCard extends StatelessWidget {
+class _SessionCard extends StatefulWidget {
   const _SessionCard({
     required this.session,
     required this.onTap,
     required this.onLeave,
   });
 
-  final Session  session;
+  final Session session;
   final VoidCallback onTap;
   final VoidCallback onLeave;
 
   @override
+  State<_SessionCard> createState() => _SessionCardState();
+}
+
+class _SessionCardState extends State<_SessionCard> {
+  // 남은 시간을 계산하는 헬퍼 함수
+  String _getRemainingTime(DateTime? expiresAt) {
+    if (expiresAt == null) return '만료 시간 없음';
+    
+    final diff = expiresAt.difference(DateTime.now());
+    if (diff.isNegative) return '만료됨';
+
+    if (diff.inDays > 0) {
+      return '${diff.inDays}일 ${diff.inHours % 24}시간 남음';
+    } else if (diff.inHours > 0) {
+      return '${diff.inHours}시간 ${diff.inMinutes % 60}분 남음';
+    } else {
+      return '${diff.inMinutes}분 남음';
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final session = widget.session;
+    final remainingTimeText = _getRemainingTime(session.expiresAt);
+    final isExpired = session.expiresAt != null && session.expiresAt!.isBefore(DateTime.now());
+
     return Card(
       elevation: 2,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       child: InkWell(
         borderRadius: BorderRadius.circular(16),
-        onTap: onTap,
+        // ★ 수정됨: 만료된 방이면 탭(입장)을 막고 스낵바를 띄움
+        onTap: isExpired 
+            ? () {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('만료된 세션입니다. 잠시 후 완전히 종료됩니다.'),
+                    backgroundColor: Colors.grey,
+                    duration: Duration(seconds: 2),
+                  ),
+                );
+              }
+            : widget.onTap,
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
@@ -320,7 +470,7 @@ class _SessionCard extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  // 세션 아이콘
+                  // 세션 아이콘 (기본 마커 아이콘)
                   Container(
                     width: 44,
                     height: 44,
@@ -332,7 +482,7 @@ class _SessionCard extends StatelessWidget {
                   ),
                   const SizedBox(width: 12),
 
-                  // 세션 이름 + 뱃지
+                  // 세션 이름 + 뱃지 + 남은 시간
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -366,16 +516,33 @@ class _SessionCard extends StatelessWidget {
                               ),
                           ],
                         ),
-                        const SizedBox(height: 4),
+                        const SizedBox(height: 6),
                         Row(
                           children: [
-                            const Icon(Icons.people_outlined,
-                                size: 14, color: Colors.grey),
+                            // 인원수 표시
+                            const Icon(Icons.people_outlined, size: 14, color: Colors.grey),
                             const SizedBox(width: 4),
                             Text(
                               '${session.memberCount}명',
+                              style: TextStyle(color: Colors.grey[600], fontSize: 13),
+                            ),
+                            
+                            const SizedBox(width: 12),
+                            
+                            // 남은 시간 표시 (만료되었으면 빨간색, 아니면 주황색)
+                            Icon(
+                              Icons.timer_outlined, 
+                              size: 14, 
+                              color: isExpired ? Colors.red : Colors.orange[700]
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              remainingTimeText,
                               style: TextStyle(
-                                  color: Colors.grey[600], fontSize: 13),
+                                color: isExpired ? Colors.red : Colors.orange[700], 
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500,
+                              ),
                             ),
                           ],
                         ),
@@ -383,7 +550,7 @@ class _SessionCard extends StatelessWidget {
                     ),
                   ),
 
-                  // 초대 코드 + 나가기
+                  // 초대 코드 + 나가기 버튼
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
@@ -426,7 +593,7 @@ class _SessionCard extends StatelessWidget {
                         icon: const Icon(Icons.exit_to_app,
                             size: 20, color: Colors.red),
                         tooltip: '나가기',
-                        onPressed: onLeave,
+                        onPressed: widget.onLeave,
                         visualDensity: VisualDensity.compact,
                       ),
                     ],

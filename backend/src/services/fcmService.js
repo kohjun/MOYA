@@ -103,7 +103,7 @@ export async function requestBackgroundLocations(sessionId, requestedBy) {
   // Silent Push: notification 없음, data만 있음
   const message = {
     data: {
-      type: 'location_request',
+      type: 'wakeUp', 
       session_id: sessionId,
     },
     android: {
@@ -116,7 +116,7 @@ export async function requestBackgroundLocations(sessionId, requestedBy) {
   try {
     const response = await admin.messaging().sendEachForMulticast(message);
     _cleanupInvalidTokens(members, response);
-    console.log(`[FCM] Location request sent: ${response.successCount}/${tokens.length}`);
+    console.log(`[FCM] Location request sent (wakeUp): ${response.successCount}/${tokens.length}`);
   } catch (err) {
     console.error('[FCM] sendEachForMulticast error:', err.message);
   }

@@ -1,9 +1,11 @@
 // lib/features/geofence/presentation/geofence_screen.dart
 
+import 'dart:convert'; // ★ 추가됨: JSON 인코딩용
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:flutter_naver_map/flutter_naver_map.dart';
+import 'package:shared_preferences/shared_preferences.dart'; // ★ 추가됨: 로컬 저장소용
 
 import '../data/geofence_repository.dart';
 import '../../auth/data/auth_repository.dart';
@@ -20,18 +22,38 @@ class GeofenceScreen extends ConsumerStatefulWidget {
 }
 
 class _GeofenceScreenState extends ConsumerState<GeofenceScreen> {
-  GoogleMapController? _mapCtrl;
+  NaverMapController? _mapCtrl;
   List<Geofence> _geofences = [];
   bool _loading = false;
 
   // ── 추가 모드 ──────────────────────────────────────────────────────────────
   bool _addMode = false;
-  LatLng _mapCenter = const LatLng(37.5665, 126.9780);
 
   @override
   void initState() {
     super.initState();
     _loadGeofences();
+  }
+
+  // ── 백그라운드 서비스용 지오펜스 동기화 함수 ────────────────────────────────
+  Future<void> _updateLocalGeofences() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      
+      // Geofence 객체를 백그라운드에서 읽기 쉬운 Map 형태로 변환
+      final List<Map<String, dynamic>> jsonData = _geofences.map((gf) => {
+        'id': gf.id,
+        'name': gf.name,
+        'lat': gf.lat,
+        'lng': gf.lng,
+        'radius': gf.radiusM, // 백그라운드 서비스 코드와 동일하게 radius 키 사용
+      }).toList();
+
+      await prefs.setString('geofences_${widget.sessionId}', jsonEncode(jsonData));
+      debugPrint('[Geofence] 백그라운드용 데이터 저장 완료 (${jsonData.length}개)');
+    } catch (e) {
+      debugPrint('[Geofence] 로컬 저장 실패: $e');
+    }
   }
 
   // ── 로드 ──────────────────────────────────────────────────────────────────
@@ -43,9 +65,43 @@ class _GeofenceScreenState extends ConsumerState<GeofenceScreen> {
           .getGeofences(widget.sessionId);
       if (!mounted) return;
       setState(() { _geofences = list; _loading = false; });
+      _updateMapOverlays();
+
+      // ★ 목록을 새로 불러올 때마다 백그라운드용 데이터도 함께 업데이트
+      await _updateLocalGeofences();
     } catch (e) {
       if (mounted) setState(() => _loading = false);
       _showError('지오펜스 로드 실패: $e');
+    }
+  }
+
+  // ── 지도 오버레이 갱신 ──────────────────────────────────────────────────────
+  void _updateMapOverlays() {
+    if (_mapCtrl == null) return;
+    _mapCtrl!.clearOverlays();
+
+    final overlays = <NAddableOverlay>{};
+    for (final f in _geofences) {
+      overlays.add(NCircleOverlay(
+        id: 'circle_${f.id}',
+        center: NLatLng(f.lat, f.lng),
+        radius: f.radiusM,
+        color: const Color(0xFF2196F3).withValues(alpha: 0.15),
+        outlineColor: const Color(0xFF2196F3),
+        outlineWidth: 2,
+      ));
+
+      overlays.add(NMarker(
+        id: 'marker_${f.id}',
+        position: NLatLng(f.lat, f.lng),
+      )
+        ..setIconTintColor(const Color(0xFF2196F3))
+        ..setCaption(NOverlayCaption(text: f.name))
+        ..setSubCaption(NOverlayCaption(text: '반경 ${f.radiusM.round()}m')));
+    }
+
+    if (overlays.isNotEmpty) {
+      _mapCtrl!.addOverlayAll(overlays);
     }
   }
 
@@ -55,23 +111,19 @@ class _GeofenceScreenState extends ConsumerState<GeofenceScreen> {
   }
 
   // ── 추가 모드 확정: 현재 지도 중심 위치로 다이얼로그 열기 ───────────────────
-  void _confirmAddLocation() {
-    _showAddDialog(_mapCenter);
+  Future<void> _confirmAddLocation() async {
+    if (_mapCtrl == null) return;
+    final pos = await _mapCtrl!.getCameraPosition();
+    _showAddDialog(pos.target);
   }
 
   // ── 지도 탭으로도 추가 가능 (추가 모드 여부 무관) ─────────────────────────
-  void _onMapTap(LatLng pos) {
+  void _onMapTap(NLatLng pos) {
     _showAddDialog(pos);
   }
 
-  // ── 지도 카메라 이동 시 중심 좌표 갱신 ──────────────────────────────────
-  void _onCameraMove(CameraPosition pos) {
-    _mapCenter = pos.target;
-  }
-
   // ── 추가 다이얼로그 ────────────────────────────────────────────────────────
-  void _showAddDialog(LatLng pos) {
-    // 추가 모드를 잠시 숨기되 해제하지는 않음 (다이얼로그 닫으면 모드 유지)
+  void _showAddDialog(NLatLng pos) {
     final nameCtrl   = TextEditingController();
     final radiusCtrl = TextEditingController(text: '100');
 
@@ -83,7 +135,6 @@ class _GeofenceScreenState extends ConsumerState<GeofenceScreen> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 위치 표시
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
@@ -131,7 +182,6 @@ class _GeofenceScreenState extends ConsumerState<GeofenceScreen> {
             onPressed: () => Navigator.pop(ctx),
             child: const Text('취소'),
           ),
-          // "저장 후 계속 추가" 버튼
           OutlinedButton(
             onPressed: () async {
               final name   = nameCtrl.text.trim();
@@ -139,7 +189,6 @@ class _GeofenceScreenState extends ConsumerState<GeofenceScreen> {
               if (name.isEmpty) return;
               Navigator.pop(ctx);
               await _createGeofence(name, pos, radius);
-              // 추가 모드 유지 → 바로 다음 지오펜스 추가 가능
               if (mounted) setState(() => _addMode = true);
             },
             child: const Text('저장 후 계속'),
@@ -160,7 +209,7 @@ class _GeofenceScreenState extends ConsumerState<GeofenceScreen> {
     );
   }
 
-  Future<void> _createGeofence(String name, LatLng pos, double radius) async {
+  Future<void> _createGeofence(String name, NLatLng pos, double radius) async {
     try {
       await ref.read(geofenceRepositoryProvider).createGeofence(
             widget.sessionId,
@@ -169,7 +218,7 @@ class _GeofenceScreenState extends ConsumerState<GeofenceScreen> {
             centerLng: pos.longitude,
             radiusM:   radius,
           );
-      await _loadGeofences();
+      await _loadGeofences(); // 이 안에서 _updateLocalGeofences()도 자동 호출됨
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -212,7 +261,7 @@ class _GeofenceScreenState extends ConsumerState<GeofenceScreen> {
       await ref
           .read(geofenceRepositoryProvider)
           .deleteGeofence(widget.sessionId, fence.id);
-      await _loadGeofences();
+      await _loadGeofences(); // 이 안에서 _updateLocalGeofences()도 자동 호출됨
     } catch (e) {
       _showError('삭제 실패: $e');
     }
@@ -230,32 +279,6 @@ class _GeofenceScreenState extends ConsumerState<GeofenceScreen> {
   Widget build(BuildContext context) {
     final myId = ref.watch(authProvider).valueOrNull?.id;
     final count = _geofences.length;
-
-    final circles = <Circle>{
-      for (final f in _geofences)
-        Circle(
-          circleId:    CircleId(f.id),
-          center:      LatLng(f.lat, f.lng),
-          radius:      f.radiusM,
-          fillColor:   const Color(0xFF2196F3).withValues(alpha: 0.15),
-          strokeColor: const Color(0xFF2196F3),
-          strokeWidth: 2,
-        ),
-    };
-
-    final markers = <Marker>{
-      for (final f in _geofences)
-        Marker(
-          markerId:    MarkerId('fence_${f.id}'),
-          position:    LatLng(f.lat, f.lng),
-          infoWindow:  InfoWindow(
-            title:   f.name,
-            snippet: '반경 ${f.radiusM.round()}m',
-          ),
-          icon: BitmapDescriptor.defaultMarkerWithHue(
-              BitmapDescriptor.hueAzure),
-        ),
-    };
 
     return Scaffold(
       appBar: AppBar(
@@ -342,37 +365,38 @@ class _GeofenceScreenState extends ConsumerState<GeofenceScreen> {
             child: Stack(
               alignment: Alignment.center,
               children: [
-                GoogleMap(
-                  initialCameraPosition: const CameraPosition(
-                    target: LatLng(37.5665, 126.9780),
-                    zoom: 14.0,
+                NaverMap(
+                  options: const NaverMapViewOptions(
+                    initialCameraPosition: NCameraPosition(
+                      target: NLatLng(37.5665, 126.9780),
+                      zoom: 14.0,
+                    ),
+                    zoomGesturesEnable: true,
+                    locationButtonEnable: true,
                   ),
-                  onMapCreated: (ctrl) => _mapCtrl = ctrl,
-                  onTap: _onMapTap,
-                  onCameraMove: _onCameraMove,
-                  circles: circles,
-                  markers: markers,
-                  zoomControlsEnabled: false,
-                  buildingsEnabled: false,
-                  myLocationEnabled: true,
-                  myLocationButtonEnabled: true,
+                  onMapReady: (ctrl) {
+                    _mapCtrl = ctrl;
+                    _updateMapOverlays();
+                  },
+                  onMapTapped: (point, latLng) {
+                    if (_addMode) {
+                      _onMapTap(latLng);
+                    }
+                  },
                 ),
 
                 // ── 추가 모드 십자선 ────────────────────────────────────
                 if (_addMode) ...[
-                  // 세로선
                   Container(
                     width: 1.5,
                     height: 40,
                     color: Colors.red.withValues(alpha: 0.8),
                   ),
-                  // 가로선
                   Container(
                     width: 40,
                     height: 1.5,
                     color: Colors.red.withValues(alpha: 0.8),
                   ),
-                  // 중심 원
                   Container(
                     width: 8,
                     height: 8,
@@ -381,22 +405,25 @@ class _GeofenceScreenState extends ConsumerState<GeofenceScreen> {
                       shape: BoxShape.circle,
                     ),
                   ),
-                  // 하단 확정 버튼
                   Positioned(
                     bottom: 16,
-                    child: ElevatedButton.icon(
-                      onPressed: _confirmAddLocation,
-                      icon: const Icon(Icons.add_location_alt),
-                      label: const Text('이 위치에 추가'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF2196F3),
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 20, vertical: 12),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(24),
+                    left: 0,
+                    right: 0,
+                    child: Center(
+                      child: ElevatedButton.icon(
+                        onPressed: _confirmAddLocation,
+                        icon: const Icon(Icons.add_location_alt),
+                        label: const Text('이 위치에 추가'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF2196F3),
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 20, vertical: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(24),
+                          ),
+                          elevation: 4,
                         ),
-                        elevation: 4,
                       ),
                     ),
                   ),
@@ -480,12 +507,16 @@ class _GeofenceScreenState extends ConsumerState<GeofenceScreen> {
                                 onPressed: () => _deleteGeofence(f),
                               )
                             : null,
-                        onTap: () => _mapCtrl?.animateCamera(
-                          CameraUpdate.newLatLngZoom(
-                            LatLng(f.lat, f.lng),
-                            _zoomForRadius(f.radiusM),
-                          ),
-                        ),
+                        onTap: () {
+                          if (_mapCtrl != null) {
+                            _mapCtrl!.updateCamera(
+                              NCameraUpdate.scrollAndZoomTo(
+                                target: NLatLng(f.lat, f.lng),
+                                zoom: _zoomForRadius(f.radiusM),
+                              )..setAnimation(animation: NCameraAnimation.easing),
+                            );
+                          }
+                        },
                       );
                     },
                   ),
@@ -493,7 +524,6 @@ class _GeofenceScreenState extends ConsumerState<GeofenceScreen> {
         ],
       ),
 
-      // ── FAB: 추가 모드 토글 ──────────────────────────────────────────────
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _toggleAddMode,
         icon: Icon(_addMode ? Icons.close : Icons.add_location_alt),
