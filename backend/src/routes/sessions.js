@@ -7,6 +7,7 @@ import { getIo, EVENTS } from '../websocket/index.js';
 
 const createSessionSchema = z.object({
   name: z.string().max(100).optional(),
+  activeModules: z.array(z.string()).max(5).optional(),
 });
 
 export default async function sessionRoutes(fastify) {

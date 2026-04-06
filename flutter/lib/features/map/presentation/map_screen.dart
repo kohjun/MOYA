@@ -69,6 +69,41 @@ class MemberState {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 게임 상태 모델
+// ─────────────────────────────────────────────────────────────────────────────
+
+class GameState {
+  final String       status;          // 'none' | 'in_progress' | 'finished'
+  final int          aliveCount;
+  final List<String> alivePlayerIds;
+  final String?      winnerId;
+  final String?      taggerId;
+  final int?         roundNumber;
+  final int?         incompleteMissionCount;
+
+  const GameState({
+    this.status                 = 'none',
+    this.aliveCount             = 0,
+    this.alivePlayerIds         = const [],
+    this.winnerId,
+    this.taggerId,
+    this.roundNumber,
+    this.incompleteMissionCount,
+  });
+
+  factory GameState.fromMap(Map<String, dynamic> data) => GameState(
+    status:                 data['status']                 as String? ?? 'none',
+    aliveCount:             data['aliveCount']             as int?    ?? 0,
+    alivePlayerIds:         (data['alivePlayerIds']        as List<dynamic>?)
+        ?.whereType<String>().toList() ?? const [],
+    winnerId:               data['winnerId']               as String?,
+    taggerId:               data['taggerId']               as String?,
+    roundNumber:            data['roundNumber']            as int?,
+    incompleteMissionCount: data['incompleteMissionCount'] as int?,
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 세션 지도 Notifier
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -82,6 +117,11 @@ class MapSessionState {
   final Set<String> hiddenMembers;
   final bool wasKicked;
   final String myRole; // 'host' | 'admin' | 'member'
+  final bool isEliminated;
+  final Set<String> eliminatedUserIds;
+  final Map<String, double> memberDistances;
+  final String? proximateTargetId;
+  final GameState gameState;
 
   /// 한 번이라도 연결 성공 여부 (connecting vs reconnecting 구분용)
   final bool hasEverConnected;
@@ -97,6 +137,11 @@ class MapSessionState {
     this.hiddenMembers = const {},
     this.wasKicked = false,
     this.myRole = 'member',
+    this.isEliminated = false,
+    this.eliminatedUserIds = const {},
+    this.memberDistances = const {},
+    this.proximateTargetId,
+    this.gameState = const GameState(),
   });
 
   MapSessionState copyWith({
@@ -110,20 +155,35 @@ class MapSessionState {
     Set<String>? hiddenMembers,
     bool? wasKicked,
     String? myRole,
+    bool? isEliminated,
+    Set<String>? eliminatedUserIds,
+    Map<String, double>? memberDistances,
+    Object? proximateTargetId = _sentinel,
+    GameState? gameState,
   }) =>
       MapSessionState(
-        members:          members          ?? this.members,
-        myPosition:       myPosition       ?? this.myPosition,
-        isConnected:      isConnected      ?? this.isConnected,
-        hasEverConnected: hasEverConnected ?? this.hasEverConnected,
-        sosTriggered:     sosTriggered     ?? this.sosTriggered,
-        sessionName:      sessionName      ?? this.sessionName,
-        sharingEnabled:   sharingEnabled   ?? this.sharingEnabled,
-        hiddenMembers:    hiddenMembers    ?? this.hiddenMembers,
-        wasKicked:        wasKicked        ?? this.wasKicked,
-        myRole:           myRole           ?? this.myRole,
+        members:            members            ?? this.members,
+        myPosition:         myPosition         ?? this.myPosition,
+        isConnected:        isConnected        ?? this.isConnected,
+        hasEverConnected:   hasEverConnected   ?? this.hasEverConnected,
+        sosTriggered:       sosTriggered       ?? this.sosTriggered,
+        sessionName:        sessionName        ?? this.sessionName,
+        sharingEnabled:     sharingEnabled     ?? this.sharingEnabled,
+        hiddenMembers:      hiddenMembers      ?? this.hiddenMembers,
+        wasKicked:          wasKicked          ?? this.wasKicked,
+        myRole:             myRole             ?? this.myRole,
+        isEliminated:       isEliminated       ?? this.isEliminated,
+        eliminatedUserIds:  eliminatedUserIds  ?? this.eliminatedUserIds,
+        memberDistances:    memberDistances    ?? this.memberDistances,
+        proximateTargetId:  proximateTargetId == _sentinel
+            ? this.proximateTargetId
+            : proximateTargetId as String?,
+        gameState:          gameState          ?? this.gameState,
       );
 }
+
+// sentinel object for nullable copyWith fields
+const Object _sentinel = Object();
 
 class MapSessionNotifier extends StateNotifier<MapSessionState> {
   MapSessionNotifier(this._sessionId, this._ref)
@@ -148,6 +208,10 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
   StreamSubscription? _kickedSub;
   StreamSubscription? _roleChangedSub;
   StreamSubscription? _sessionExpiredSub;
+  StreamSubscription? _proximityKilledSub;
+  StreamSubscription? _playerEliminatedSub;
+  StreamSubscription? _gameStateSub;
+  StreamSubscription? _gameOverSub;
 
   Timer? _joinRetryTimer;
 
@@ -191,7 +255,38 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
     // ── 세션 만료 수신 ──
     _sessionExpiredSub = _socket.onSessionExpired.listen((data) {
       debugPrint('[Map] 세션 만료 수신: ${data['message']}');
-      state = state.copyWith(wasKicked: true); 
+      state = state.copyWith(wasKicked: true);
+    });
+
+    // ── 근접 제거 수신 ──
+    _proximityKilledSub = _socket.onProximityKilled.listen((data) {
+      debugPrint('[Map] proximity:killed 수신 — killedBy: ${data['killedBy']}');
+      state = state.copyWith(isEliminated: true);
+    });
+
+    // ── 세션 전체 탈락 브로드캐스트 수신 ──
+    _playerEliminatedSub = _socket.onPlayerEliminated.listen((data) {
+      final eliminatedId = data['userId'] as String?;
+      if (eliminatedId == null) return;
+      debugPrint('[Map] player:eliminated 수신 — userId: $eliminatedId');
+      state = state.copyWith(
+        eliminatedUserIds: {...state.eliminatedUserIds, eliminatedId},
+      );
+    });
+
+    // ── 게임 상태 갱신 수신 ──
+    _gameStateSub = _socket.onGameStateUpdate.listen((data) {
+      state = state.copyWith(gameState: GameState.fromMap(data));
+    });
+
+    // ── 게임 종료 수신 ──
+    _gameOverSub = _socket.onGameOver.listen((data) {
+      state = state.copyWith(
+        gameState: GameState(
+          status: 'finished',
+          winnerId: data['winnerId'] as String?,
+        ),
+      );
     });
 
     // 역할 변경 수신
@@ -344,6 +439,7 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
       if (_socket.isConnected) {
         state = state.copyWith(isConnected: true, hasEverConnected: true);
         _socket.joinSession(_sessionId);
+        _socket.requestGameState(_sessionId);
       }
     } catch (e) {
       debugPrint('[Map] Socket connect failed: $e');
@@ -365,7 +461,7 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
         if (authUser != null) {
           final myId = authUser.id;
           final currentMe = state.members[myId];
-          
+
           if (currentMe != null) {
             final updated = Map<String, MemberState>.from(state.members);
             updated[myId] = currentMe.copyWith(
@@ -375,6 +471,26 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
             );
             state = state.copyWith(members: updated);
           }
+
+          // 근접 타겟 갱신
+          final distances = <String, double>{};
+          String? closestId;
+          double closestDist = double.infinity;
+          for (final entry in state.members.entries) {
+            if (entry.key == myId) continue;
+            final m = entry.value;
+            if (m.lat == 0 && m.lng == 0) continue;
+            final dist = _haversineMeters(pos.latitude, pos.longitude, m.lat, m.lng);
+            distances[m.userId] = dist;
+            if (dist < closestDist) {
+              closestDist = dist;
+              closestId = m.userId;
+            }
+          }
+          state = state.copyWith(
+            memberDistances:   distances,
+            proximateTargetId: closestDist <= 15.0 ? closestId : null,
+          );
         }
 
         // ★ 추가됨: 위치가 갱신될 때마다 지오펜스 진입/이탈 체크
@@ -434,6 +550,18 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
     } catch (e) {
       debugPrint('[Background] 서비스 시작 실패: $e');
     }
+  }
+
+  // ── 근접 거리 계산 (Haversine, 미터) ────────────────────────────────────
+  static double _haversineMeters(double lat1, double lng1, double lat2, double lng2) {
+    const R = 6371000.0;
+    final dLat = (lat2 - lat1) * math.pi / 180;
+    final dLng = (lng2 - lng1) * math.pi / 180;
+    final a = math.sin(dLat / 2) * math.sin(dLat / 2) +
+        math.cos(lat1 * math.pi / 180) *
+        math.cos(lat2 * math.pi / 180) *
+        math.sin(dLng / 2) * math.sin(dLng / 2);
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
   }
 
   // ★ 추가됨: 지오펜스 진입/이탈 판정 및 알림 호출 함수
@@ -520,6 +648,22 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
     _socket.sendSOS(lat: pos?.latitude, lng: pos?.longitude);
   }
 
+  void sendKillAction(String targetUserId) {
+    _socket.interactAction(
+      sessionId: _sessionId,
+      actionType: 'PROXIMITY_KILL',
+      targetUserId: targetUserId,
+    );
+  }
+
+  void startGame() {
+    _socket.emitGameStart(_sessionId);
+  }
+
+  void openVote() {
+    _socket.emitVoteOpen(_sessionId);
+  }
+
   Future<void> reconnect() async {
     try {
       await _socket.connect();
@@ -547,6 +691,10 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
     _kickedSub?.cancel();
     _roleChangedSub?.cancel();
     _sessionExpiredSub?.cancel();
+    _proximityKilledSub?.cancel();
+    _playerEliminatedSub?.cancel();
+    _gameStateSub?.cancel();
+    _gameOverSub?.cancel();
     _gps.stopTracking();
     _socket.disconnect();
     // 방에서 나가거나 강퇴당하면 백그라운드 서비스를 종료합니다.
@@ -583,11 +731,12 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   // ── 마커 캐시 ─────────────────────────────────────────────────────────────
   // members/sharingEnabled/hiddenMembers가 실제로 변경됐을 때만 마커를 재계산한다.
   // myPosition이 바뀌는 경우(GPS 업데이트)에는 재계산하지 않는다.
-  Set<NMarker>              _cachedMarkers      = {};
+  Set<NMarker>              _cachedMarkers        = {};
   Map<String, MemberState>? _prevMembers;
   bool?                     _prevSharingEnabled;
   Set<String>?              _prevHiddenMembers;
   String?                   _prevMyUserId;
+  Set<String>?              _prevEliminatedUserIds;
 
   @override
   Widget build(BuildContext context) {
@@ -614,6 +763,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     final mapState = ref.watch(mapSessionProvider(widget.sessionId));
     final authUser = ref.watch(authProvider).valueOrNull;
 
+    // 활성 모듈 목록 (세션 캐시에서 조회)
+    final activeModules = getSessionModules(ref).toSet();
+
     // 내 위치 따라가기
     final myPos = mapState.myPosition;
     if (_followMe && myPos != null && _mapController != null) {
@@ -626,20 +778,23 @@ class _MapScreenState extends ConsumerState<MapScreen> {
 
     // 마커 캐시: 마커에 영향 주는 상태가 실제로 바뀐 경우에만 재계산
     final myUserId = authUser?.id;
-    if (!identical(_prevMembers,      mapState.members)      ||
-        _prevSharingEnabled          != mapState.sharingEnabled ||
-        !identical(_prevHiddenMembers, mapState.hiddenMembers) ||
-        _prevMyUserId                != myUserId) {
-      _prevMembers        = mapState.members;
-      _prevSharingEnabled = mapState.sharingEnabled;
-      _prevHiddenMembers  = mapState.hiddenMembers;
-      _prevMyUserId       = myUserId;
-      
+    if (!identical(_prevMembers,           mapState.members)          ||
+        _prevSharingEnabled               != mapState.sharingEnabled   ||
+        !identical(_prevHiddenMembers,     mapState.hiddenMembers)     ||
+        !identical(_prevEliminatedUserIds, mapState.eliminatedUserIds) ||
+        _prevMyUserId                     != myUserId) {
+      _prevMembers           = mapState.members;
+      _prevSharingEnabled    = mapState.sharingEnabled;
+      _prevHiddenMembers     = mapState.hiddenMembers;
+      _prevEliminatedUserIds = mapState.eliminatedUserIds;
+      _prevMyUserId          = myUserId;
+
       _cachedMarkers = _buildMarkers(
         mapState.members,
         myUserId,
         mapState.sharingEnabled,
         mapState.hiddenMembers,
+        mapState.eliminatedUserIds,
       );
 
       // 네이버 지도는 오버레이를 컨트롤러를 통해 직접 갱신해야 합니다.
@@ -763,6 +918,315 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               ),
             ),
 
+          // ── 근접 상호작용 버튼 (태그 or 제거) ──────────────────────────
+          if (activeModules.contains('proximity') &&
+              mapState.proximateTargetId != null &&
+              !mapState.isEliminated &&
+              mapState.gameState.status == 'in_progress')
+            Positioned(
+              bottom: 280,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: FloatingActionButton.extended(
+                  heroTag: 'kill',
+                  backgroundColor: Colors.red,
+                  foregroundColor: Colors.white,
+                  icon: Icon(activeModules.contains('tag')
+                      ? Icons.touch_app
+                      : Icons.skull),
+                  label: Text(
+                    activeModules.contains('tag') ? '태그' : '제거',
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                  ),
+                  onPressed: () => ref
+                      .read(mapSessionProvider(widget.sessionId).notifier)
+                      .sendKillAction(mapState.proximateTargetId!),
+                ),
+              ),
+            ),
+
+          // ── 게임 시작 버튼 (호스트 전용) ─────────────────────────────────
+          if (mapState.myRole == 'host' &&
+              mapState.gameState.status == 'none' &&
+              activeModules.contains('proximity'))
+            Positioned(
+              top: 80,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.green,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 14),
+                    textStyle: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  onPressed: () => ref
+                      .read(mapSessionProvider(widget.sessionId).notifier)
+                      .startGame(),
+                  child: const Text('게임 시작'),
+                ),
+              ),
+            ),
+
+          // ── 게임 HUD (생존자 수) ──────────────────────────────────────────
+          if (mapState.gameState.status == 'in_progress')
+            Positioned(
+              top: 80,
+              right: 16,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.6),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.person, color: Colors.white, size: 18),
+                    const SizedBox(width: 4),
+                    Text(
+                      '생존 ${mapState.gameState.aliveCount}명',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+          // ── 태그 모듈: 술래 표시 ──────────────────────────────────────────
+          if (activeModules.contains('tag') &&
+              mapState.gameState.status == 'in_progress')
+            Positioned(
+              top: 80,
+              left: 16,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.6),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.directions_run,
+                      color: mapState.gameState.taggerId == myUserId
+                          ? Colors.red
+                          : Colors.grey[400],
+                      size: 24,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      mapState.gameState.taggerId == myUserId ? '술래' : '도망자',
+                      style: TextStyle(
+                        color: mapState.gameState.taggerId == myUserId
+                            ? Colors.red
+                            : Colors.grey[300],
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+          // ── 라운드·투표 모듈 패널 ─────────────────────────────────────────
+          if (activeModules.contains('round') && activeModules.contains('vote'))
+            Positioned(
+              bottom: 290,
+              right: 16,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.6),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      '라운드 ${mapState.gameState.roundNumber ?? 0}',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  if (mapState.myRole == 'host') ...[
+                    const SizedBox(height: 6),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF7C3AED),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 10),
+                        textStyle: const TextStyle(
+                            fontSize: 13, fontWeight: FontWeight.bold),
+                      ),
+                      onPressed: () => ref
+                          .read(mapSessionProvider(widget.sessionId).notifier)
+                          .openVote(),
+                      child: const Text('투표 시작'),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+
+          // ── 미션 모듈: 미션 뱃지 + 버튼 ─────────────────────────────────
+          if (activeModules.contains('mission'))
+            Positioned(
+              bottom: 290,
+              right: 16,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.orange,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 10),
+                          textStyle: const TextStyle(
+                              fontSize: 13, fontWeight: FontWeight.bold),
+                        ),
+                        icon: const Icon(Icons.explore, size: 18),
+                        label: const Text('미션 보기'),
+                        onPressed: () {},
+                      ),
+                      if ((mapState.gameState.incompleteMissionCount ?? 0) > 0)
+                        Positioned(
+                          top: -6,
+                          right: -6,
+                          child: Container(
+                            padding: const EdgeInsets.all(4),
+                            decoration: const BoxDecoration(
+                              color: Colors.red,
+                              shape: BoxShape.circle,
+                            ),
+                            child: Text(
+                              '${mapState.gameState.incompleteMissionCount}',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+
+          // ── 탈락 오버레이 ────────────────────────────────────────────────
+          if (mapState.isEliminated)
+            Positioned.fill(
+              child: ColoredBox(
+                color: Colors.black.withValues(alpha: 0.75),
+                child: const Center(
+                  child: Text(
+                    '탈락!\n당신은 제거되었습니다',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 32,
+                      fontWeight: FontWeight.bold,
+                      height: 1.4,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
+          // ── 게임 종료 오버레이 ────────────────────────────────────────────
+          if (mapState.gameState.status == 'finished')
+            Positioned.fill(
+              child: ColoredBox(
+                color: Colors.black.withValues(alpha: 0.80),
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (mapState.gameState.winnerId != null &&
+                          mapState.gameState.winnerId == authUser?.id) ...[
+                        const Text(
+                          '우승!',
+                          style: TextStyle(
+                            color: Color(0xFFFFD700),
+                            fontSize: 48,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        const Text(
+                          'You Won',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 22,
+                          ),
+                        ),
+                      ] else ...[
+                        const Text(
+                          '게임 종료',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 36,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          mapState.gameState.winnerId != null
+                              ? (mapState.members[mapState.gameState.winnerId]
+                                      ?.nickname ??
+                                  mapState.gameState.winnerId!)
+                              : '-',
+                          style: const TextStyle(
+                            color: Color(0xFFFFD700),
+                            fontSize: 24,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 32),
+                      ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.white,
+                          foregroundColor: Colors.black87,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 40, vertical: 14),
+                          textStyle: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        onPressed: () => context.pop(),
+                        child: const Text('나가기'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
           // ── 하단 멤버 패널 ─────────────────────────────────────────────────
           Positioned(
             bottom: 0,
@@ -772,6 +1236,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               members: mapState.members.values.toList(),
               myPosition: myPos,
               hiddenMembers: mapState.hiddenMembers,
+              eliminatedUserIds: mapState.eliminatedUserIds,
               onSOS: () => _confirmSOS(context, ref),
               onMemberTap: (member) {
                 if (member.lat == 0 && member.lng == 0) return;
@@ -802,39 +1267,46 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     String? myUserId,
     bool sharingEnabled,
     Set<String> hiddenMembers,
+    Set<String> eliminatedUserIds,
   ) {
     final markers = <NMarker>{};
     for (final m in members.values) {
       if (m.lat == 0 && m.lng == 0) continue;
-      
-      final isMe = m.userId == myUserId;
-      if (isMe && !sharingEnabled) continue;   // 공유 OFF 시 내 마커 숨김
-      if (hiddenMembers.contains(m.userId)) continue; // 숨긴 멤버 제외
 
-      // 메인 캡션: 이름 (나)
-      final nameCaption = isMe ? '${m.nickname} (나)' : m.nickname;
-      
+      final isMe          = m.userId == myUserId;
+      final isEliminated  = eliminatedUserIds.contains(m.userId);
+      if (isMe && !sharingEnabled) continue;
+      if (hiddenMembers.contains(m.userId)) continue;
+
+      // 탈락자는 해골 이모지 접두 + 회색 핀
+      final nameCaption = isEliminated
+          ? '💀 ${m.nickname}'
+          : (isMe ? '${m.nickname} (나)' : m.nickname);
+      final pinColor = isEliminated
+          ? Colors.grey
+          : (isMe ? const Color(0xFF2196F3) : Colors.redAccent);
+      final captionColor = isEliminated
+          ? Colors.grey
+          : (isMe ? const Color(0xFF2196F3) : Colors.black87);
+
       final marker = NMarker(
         id: m.userId,
         position: NLatLng(m.lat, m.lng),
       )
-        // 기본 마커 핀 색상 (나는 파란색, 다른 사람은 빨간색)
-        ..setIconTintColor(isMe ? const Color(0xFF2196F3) : Colors.redAccent)
-        // 이름 표시
+        ..setIconTintColor(pinColor)
         ..setCaption(
           NOverlayCaption(
             text: nameCaption,
             textSize: 14,
-            color: isMe ? const Color(0xFF2196F3) : Colors.black87,
-            haloColor: Colors.white, // 흰색 테두리로 가독성 확보
+            color: captionColor,
+            haloColor: Colors.white,
           ),
         )
-        // 상태 및 배터리 표시
         ..setSubCaption(
           NOverlayCaption(
-            text: _markerSnippet(m),
+            text: isEliminated ? '탈락' : _markerSnippet(m),
             textSize: 12,
-            color: Colors.grey[700]!,
+            color: isEliminated ? Colors.grey : Colors.grey[700]!,
             haloColor: Colors.white,
           ),
         );
@@ -853,6 +1325,12 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     }
     if (m.battery != null) parts.add('배터리(${m.battery}%)');
     return parts.join(' '); // "이동중 배터리(80%)" 형태로 출력
+  }
+
+  List<String> getSessionModules(WidgetRef ref) {
+    final sessions = ref.watch(sessionListProvider).valueOrNull ?? [];
+    final match = sessions.where((s) => s.id == widget.sessionId);
+    return match.isNotEmpty ? match.first.activeModules : const [];
   }
 
   void _fitAllMembers(Map<String, MemberState> members, Position? myPos) {
@@ -1135,6 +1613,7 @@ class _BottomMemberPanel extends StatelessWidget {
     required this.onSOS,
     required this.onMemberTap,
     required this.hiddenMembers,
+    required this.eliminatedUserIds,
     required this.onHideToggle,
   });
 
@@ -1143,6 +1622,7 @@ class _BottomMemberPanel extends StatelessWidget {
   final VoidCallback              onSOS;
   final ValueChanged<MemberState> onMemberTap;
   final Set<String>               hiddenMembers;
+  final Set<String>               eliminatedUserIds;
   final ValueChanged<String>      onHideToggle;
 
   @override
@@ -1224,11 +1704,12 @@ class _BottomMemberPanel extends StatelessWidget {
                         children: [
                           for (final m in members)
                             _MemberChip(
-                              member:      m,
-                              myPosition:  myPosition,
-                              isHidden:    hiddenMembers.contains(m.userId),
-                              onTap:       () => onMemberTap(m),
-                              onLongPress: () => _showMemberSheet(
+                              member:       m,
+                              myPosition:   myPosition,
+                              isHidden:     hiddenMembers.contains(m.userId),
+                              isEliminated: eliminatedUserIds.contains(m.userId),
+                              onTap:        () => onMemberTap(m),
+                              onLongPress:  () => _showMemberSheet(
                                 context, m,
                                 hiddenMembers.contains(m.userId),
                                 onMemberTap, onHideToggle,
@@ -1243,11 +1724,12 @@ class _BottomMemberPanel extends StatelessWidget {
                         children: [
                           for (final m in members)
                             _MemberChip(
-                              member:      m,
-                              myPosition:  myPosition,
-                              isHidden:    hiddenMembers.contains(m.userId),
-                              onTap:       () => onMemberTap(m),
-                              onLongPress: () => _showMemberSheet(
+                              member:       m,
+                              myPosition:   myPosition,
+                              isHidden:     hiddenMembers.contains(m.userId),
+                              isEliminated: eliminatedUserIds.contains(m.userId),
+                              onTap:        () => onMemberTap(m),
+                              onLongPress:  () => _showMemberSheet(
                                 context, m,
                                 hiddenMembers.contains(m.userId),
                                 onMemberTap, onHideToggle,
@@ -1327,6 +1809,7 @@ class _MemberChip extends StatelessWidget {
     required this.onTap,
     required this.onLongPress,
     required this.isHidden,
+    required this.isEliminated,
   });
 
   final MemberState  member;
@@ -1334,6 +1817,7 @@ class _MemberChip extends StatelessWidget {
   final VoidCallback onTap;
   final VoidCallback onLongPress;
   final bool         isHidden;
+  final bool         isEliminated;
 
   @override
   Widget build(BuildContext context) {
@@ -1343,61 +1827,91 @@ class _MemberChip extends StatelessWidget {
       onTap: onTap,
       onLongPress: onLongPress,
       child: Opacity(
-        opacity: isHidden ? 0.4 : 1.0,
+        opacity: isHidden ? 0.4 : (isEliminated ? 0.5 : 1.0),
         child: Container(
           width: 72,
           height: 78,
           margin: const EdgeInsets.only(right: 8),
           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
           decoration: BoxDecoration(
-            color: Colors.grey[50],
+            color: isEliminated ? Colors.grey[100] : Colors.grey[50],
             borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: Colors.grey[200]!),
+            border: Border.all(
+              color: isEliminated ? Colors.grey[400]! : Colors.grey[200]!,
+            ),
           ),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             mainAxisSize: MainAxisSize.min,
             children: [
               Stack(
-                alignment: Alignment.bottomRight,
+                alignment: Alignment.center,
                 children: [
                   CircleAvatar(
                     radius: 16,
-                    backgroundColor:
-                        const Color(0xFF2196F3).withValues(alpha: 0.15),
+                    backgroundColor: isEliminated
+                        ? Colors.grey.withValues(alpha: 0.25)
+                        : const Color(0xFF2196F3).withValues(alpha: 0.15),
                     child: Text(
                       member.nickname.isNotEmpty
                           ? member.nickname[0].toUpperCase()
                           : '?',
-                      style: const TextStyle(
-                        color: Color(0xFF2196F3),
+                      style: TextStyle(
+                        color: isEliminated
+                            ? Colors.grey[600]
+                            : const Color(0xFF2196F3),
                         fontWeight: FontWeight.bold,
                         fontSize: 13,
                       ),
                     ),
                   ),
-                  Container(
-                    width: 9,
-                    height: 9,
-                    decoration: BoxDecoration(
-                      color: member.status == 'moving'
-                          ? Colors.green
-                          : Colors.grey,
-                      shape: BoxShape.circle,
-                      border: Border.all(color: Colors.white, width: 1.5),
+                  // 탈락자: 해골 아이콘 오버레이
+                  if (isEliminated)
+                    Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.55),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(Icons.skull, size: 16, color: Colors.white),
+                    )
+                  else
+                    // 일반: 상태 점 (bottomRight)
+                    Positioned(
+                      right: 0,
+                      bottom: 0,
+                      child: Container(
+                        width: 9,
+                        height: 9,
+                        decoration: BoxDecoration(
+                          color: member.status == 'moving'
+                              ? Colors.green
+                              : Colors.grey,
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 1.5),
+                        ),
+                      ),
                     ),
-                  ),
                 ],
               ),
               const SizedBox(height: 3),
               Text(
                 member.nickname,
-                style: const TextStyle(
-                    fontSize: 10, fontWeight: FontWeight.w600),
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                  color: isEliminated ? Colors.grey[500] : null,
+                ),
                 overflow: TextOverflow.ellipsis,
                 maxLines: 1,
               ),
-              if (distance != null)
+              if (isEliminated)
+                Text(
+                  '탈락',
+                  style: TextStyle(fontSize: 9, color: Colors.grey[500]),
+                )
+              else if (distance != null)
                 Text(
                   distance,
                   style: TextStyle(fontSize: 9, color: Colors.grey[600]),

@@ -129,6 +129,7 @@ class HomeScreen extends ConsumerWidget {
     final ctrl = TextEditingController();
     int selectedHours = 1;
     double maxMembers = 3; // 최대 인원 기본값 3명
+    SessionType selectedType = SessionType.defaultType;
 
     final Map<int, String> durationOptions = {
       1: '1시간 (기본)',
@@ -209,6 +210,46 @@ class HomeScreen extends ConsumerWidget {
                     '최소 3명에서 최대 20명까지 설정할 수 있습니다.',
                     style: TextStyle(fontSize: 12, color: Colors.grey),
                   ),
+                  const SizedBox(height: 24),
+
+                  // 세션 타입 선택
+                  const Text('세션 타입', style: TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      _TypeCard(
+                        icon: Icons.location_on,
+                        label: '기본\n위치공유',
+                        type: SessionType.defaultType,
+                        selected: selectedType == SessionType.defaultType,
+                        onTap: () => setDialogState(() => selectedType = SessionType.defaultType),
+                      ),
+                      const SizedBox(width: 8),
+                      _TypeCard(
+                        icon: Icons.directions_run,
+                        label: '공간\n추격전',
+                        type: SessionType.chase,
+                        selected: selectedType == SessionType.chase,
+                        onTap: () => setDialogState(() => selectedType = SessionType.chase),
+                      ),
+                      const SizedBox(width: 8),
+                      _TypeCard(
+                        icon: Icons.record_voice_over,
+                        label: '언어\n추론',
+                        type: SessionType.verbal,
+                        selected: selectedType == SessionType.verbal,
+                        onTap: () => setDialogState(() => selectedType = SessionType.verbal),
+                      ),
+                      const SizedBox(width: 8),
+                      _TypeCard(
+                        icon: Icons.explore,
+                        label: '위치\n탐색',
+                        type: SessionType.location,
+                        selected: selectedType == SessionType.location,
+                        onTap: () => setDialogState(() => selectedType = SessionType.location),
+                      ),
+                    ],
+                  ),
                 ],
               ),
             ),
@@ -222,14 +263,13 @@ class HomeScreen extends ConsumerWidget {
                   final name = ctrl.text.trim();
                   if (name.isEmpty) return;
                   Navigator.pop(ctx);
-                  
+
                   try {
-                    // 주의: sessionListProvider의 createSession 메서드가 
-                    // durationHours와 maxMembers 인자를 받을 수 있도록 수정하셔야 합니다.
                     final code = await ref.read(sessionListProvider.notifier).createSession(
-                      name, 
+                      name,
                       durationHours: selectedHours,
-                      maxMembers: maxMembers.toInt(), // ★ 추가됨
+                      maxMembers: maxMembers.toInt(),
+                      activeModules: selectedType.toModules(),
                     );
                     
                     if (context.mounted) {
@@ -599,6 +639,65 @@ class _SessionCardState extends State<_SessionCard> {
                     ],
                   ),
                 ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 세션 타입 선택 카드
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _TypeCard extends StatelessWidget {
+  const _TypeCard({
+    required this.icon,
+    required this.label,
+    required this.type,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final IconData      icon;
+  final String        label;
+  final SessionType   type;
+  final bool          selected;
+  final VoidCallback  onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = Theme.of(context).colorScheme.primary;
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          decoration: BoxDecoration(
+            color: selected ? color.withValues(alpha: 0.12) : Colors.grey[100],
+            border: Border.all(
+              color: selected ? color : Colors.grey[300]!,
+              width: selected ? 2 : 1,
+            ),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, color: selected ? color : Colors.grey[500], size: 24),
+              const SizedBox(height: 4),
+              Text(
+                label,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: selected ? FontWeight.bold : FontWeight.normal,
+                  color: selected ? color : Colors.grey[600],
+                  height: 1.3,
+                ),
               ),
             ],
           ),

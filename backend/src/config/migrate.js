@@ -103,6 +103,54 @@ const migrations = [
 
   // ─── session_members 역할 컬럼 추가 ─────────────────────────────
   `ALTER TABLE session_members ADD COLUMN IF NOT EXISTS role VARCHAR(20) NOT NULL DEFAULT 'member'`,
+
+  // ─── sessions 모듈 컬럼 추가 ─────────────────────────────────────
+  `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS active_modules TEXT[] DEFAULT '{}'`,
+  `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS module_configs JSONB DEFAULT '{}'::jsonb`,
+
+  // ─── 플레이어 역할 테이블 ─────────────────────────────────────────
+  `CREATE TABLE IF NOT EXISTS player_roles (
+    id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    session_id  UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role        VARCHAR(50) NOT NULL,
+    team        VARCHAR(50),
+    assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(session_id, user_id)
+  )`,
+
+  // ─── 게임 라운드 테이블 ───────────────────────────────────────────
+  `CREATE TABLE IF NOT EXISTS game_rounds (
+    id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    session_id   UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    round_number INTEGER NOT NULL,
+    phase        VARCHAR(30) NOT NULL DEFAULT 'waiting',
+    started_at   TIMESTAMPTZ,
+    ended_at     TIMESTAMPTZ,
+    config       JSONB NOT NULL DEFAULT '{}'::jsonb
+  )`,
+
+  // ─── 미션 테이블 ──────────────────────────────────────────────────
+  `CREATE TABLE IF NOT EXISTS missions (
+    id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    session_id   UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    title        VARCHAR(100) NOT NULL,
+    description  TEXT,
+    location     GEOGRAPHY(POINT, 4326),
+    radius_m     FLOAT,
+    qr_code      VARCHAR(200),
+    reward_item  VARCHAR(100),
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+
+  // ─── 플레이어 미션 완료 테이블 ───────────────────────────────────
+  `CREATE TABLE IF NOT EXISTS player_missions (
+    id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    mission_id   UUID NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+    user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(mission_id, user_id)
+  )`,
 ];
 
 (async () => {

@@ -60,6 +60,8 @@ class Session {
   final List<SessionMember> members;
   final DateTime createdAt;
   final DateTime? expiresAt; // 추가됨: 세션 만료 시간
+  final List<String> activeModules;
+  final Map<String, dynamic> moduleConfigs;
 
   const Session({
     required this.id,
@@ -70,30 +72,61 @@ class Session {
     required this.members,
     required this.createdAt,
     this.expiresAt,
+    this.activeModules = const [],
+    this.moduleConfigs = const {},
   });
 
   factory Session.fromMap(Map<String, dynamic> m) {
     final rawMembers = m['members'] as List<dynamic>? ?? [];
-    
+
     DateTime? parsedExpiresAt;
     if (m['expires_at'] != null) {
       parsedExpiresAt = DateTime.tryParse(m['expires_at'].toString());
     }
 
+    final rawModules = m['active_modules'] as List<dynamic>? ?? [];
+    final rawConfigs = m['module_configs'] as Map<String, dynamic>? ?? {};
+
     return Session(
-      id:          m['id']          as String,
-      name:        m['name']        as String,
-      code:        (m['session_code'] ?? m['code']) as String? ?? '',
-      isHost:      m['is_host']     as bool? ?? false,
-      memberCount: int.tryParse(m['member_count'].toString()) ?? rawMembers.length,
-      members:     rawMembers
+      id:            m['id']          as String,
+      name:          m['name']        as String,
+      code:          (m['session_code'] ?? m['code']) as String? ?? '',
+      isHost:        m['is_host']     as bool? ?? false,
+      memberCount:   int.tryParse(m['member_count'].toString()) ?? rawMembers.length,
+      members:       rawMembers
           .whereType<Map<String, dynamic>>()
           .map(SessionMember.fromMap)
           .toList(),
-      createdAt: DateTime.tryParse(m['created_at'] as String? ?? '') ??
+      createdAt:     DateTime.tryParse(m['created_at'] as String? ?? '') ??
           DateTime.now(),
-      expiresAt: parsedExpiresAt,
+      expiresAt:     parsedExpiresAt,
+      activeModules: rawModules.whereType<String>().toList(),
+      moduleConfigs: rawConfigs,
     );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 세션 타입 열거형
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum SessionType {
+  defaultType,
+  chase,
+  verbal,
+  location;
+
+  List<String> toModules() {
+    switch (this) {
+      case SessionType.defaultType:
+        return [];
+      case SessionType.chase:
+        return ['proximity', 'tag', 'team'];
+      case SessionType.verbal:
+        return ['vote', 'round', 'team'];
+      case SessionType.location:
+        return ['mission', 'item'];
+    }
   }
 }
 
@@ -113,15 +146,21 @@ class SessionRepository {
         .toList();
   }
 
-  // ★ 수정됨: maxMembers 파라미터를 추가로 받고 서버(data)로 넘겨줌
-  Future<Session> createSession(String name, int durationHours, int maxMembers) async {
+  // ★ 수정됨: maxMembers, activeModules 파라미터를 추가로 받고 서버(data)로 넘겨줌
+  Future<Session> createSession(
+    String name,
+    int durationHours,
+    int maxMembers, {
+    List<String> activeModules = const [],
+  }) async {
     final res = await _api.post(
-      '/sessions', 
+      '/sessions',
       data: {
         'name': name,
-        'durationHours': durationHours, 
-        'maxMembers': maxMembers, // 서버로 최대 인원수 전달
-      }
+        'durationHours': durationHours,
+        'maxMembers': maxMembers,
+        'active_modules': activeModules,
+      },
     );
     return Session.fromMap(res.data['session'] as Map<String, dynamic>);
   }
@@ -210,12 +249,18 @@ class SessionListNotifier extends AsyncNotifier<List<Session>> {
   }
 
   // ★ 수정됨: _repository 대신 ref.read()를 사용하고, 반환된 session 객체에서 code를 뽑아냄
-  Future<String> createSession(String name, {int durationHours = 1, int maxMembers = 3}) async {
+  Future<String> createSession(
+    String name, {
+    int durationHours = 1,
+    int maxMembers = 3,
+    List<String> activeModules = const [],
+  }) async {
     try {
       final session = await ref.read(sessionRepositoryProvider).createSession(
         name,
         durationHours,
-        maxMembers, 
+        maxMembers,
+        activeModules: activeModules,
       );
       
       // 세션 생성 후 목록 새로고침

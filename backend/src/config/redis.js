@@ -13,15 +13,10 @@ const redisClient = createClient({
   password: process.env.REDIS_PASSWORD || undefined,
 });
 
-// Pub/Sub 전용 클라이언트 (subscribe 상태에선 일반 명령 불가)
-const subClient = redisClient.duplicate();
-
 redisClient.on('error', (err) => console.error('[Redis] Client error:', err));
-subClient.on('error',   (err) => console.error('[Redis] Sub client error:', err));
 
 export const connectRedis = async () => {
   await redisClient.connect();
-  await subClient.connect();
   console.log('[Redis] Connected');
 };
 
@@ -53,4 +48,4 @@ export const delPattern = async (pattern) => {
   if (keys.length > 0) await redisClient.del(keys);
 };
 
-export { redisClient, subClient };
+export { redisClient };

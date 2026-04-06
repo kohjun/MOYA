@@ -63,6 +63,7 @@ class SocketEvents {
   static const locationUpdate = 'location:update';
   static const statusUpdate   = 'status:update';
   static const sosTrigger     = 'sos:trigger';
+  static const actionInteract = 'action:interact';
 
   // Server → Client
   static const sessionJoined   = 'session:joined';
@@ -76,7 +77,16 @@ class SocketEvents {
   static const roleChanged     = 'role_changed';
   static const error           = 'error';
   // 추가됨: 세션 만료 이벤트
-  static const sessionExpired  = 'sessionExpired'; 
+  static const sessionExpired  = 'sessionExpired';
+  // 근접 제거 이벤트
+  static const proximityKilled   = 'proximity:killed';
+  // 세션 전체 탈락 브로드캐스트
+  static const playerEliminated  = 'player:eliminated';
+  // 게임 라이프사이클
+  static const gameStart        = 'game:start';
+  static const gameRequestState = 'game:request_state';
+  static const gameStateUpdate  = 'game:state_update';
+  static const gameOver         = 'game:over';
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -107,7 +117,11 @@ class SocketService {
   final _roleChangedController = StreamController<Map<String, dynamic>>.broadcast();
   
   // 추가됨: 세션 만료 스트림 컨트롤러
-  final _sessionExpiredController = StreamController<Map<String, dynamic>>.broadcast();
+  final _sessionExpiredController   = StreamController<Map<String, dynamic>>.broadcast();
+  final _proximityKilledController  = StreamController<Map<String, dynamic>>.broadcast();
+  final _playerEliminatedController = StreamController<Map<String, dynamic>>.broadcast();
+  final _gameStateController        = StreamController<Map<String, dynamic>>.broadcast();
+  final _gameOverController         = StreamController<Map<String, dynamic>>.broadcast();
 
   Stream<LocationPayload>      get onLocationChanged => _locationController.stream;
   Stream<Map<String, dynamic>> get onMemberJoined    => _memberJoinController.stream;
@@ -120,7 +134,11 @@ class SocketService {
   Stream<Map<String, dynamic>> get onRoleChanged     => _roleChangedController.stream;
   
   // 추가됨: 세션 만료 스트림 getter
-  Stream<Map<String, dynamic>> get onSessionExpired  => _sessionExpiredController.stream;
+  Stream<Map<String, dynamic>> get onSessionExpired    => _sessionExpiredController.stream;
+  Stream<Map<String, dynamic>> get onProximityKilled   => _proximityKilledController.stream;
+  Stream<Map<String, dynamic>> get onPlayerEliminated  => _playerEliminatedController.stream;
+  Stream<Map<String, dynamic>> get onGameStateUpdate   => _gameStateController.stream;
+  Stream<Map<String, dynamic>> get onGameOver          => _gameOverController.stream;
 
   bool get isConnected => _isConnected;
 
@@ -217,7 +235,23 @@ class SocketService {
           
       // 추가됨: 세션 만료 수신
       ..on(SocketEvents.sessionExpired, (data) =>
-          _sessionExpiredController.add(Map<String, dynamic>.from(data as Map? ?? {})));
+          _sessionExpiredController.add(Map<String, dynamic>.from(data as Map? ?? {})))
+
+      // 근접 제거 수신
+      ..on(SocketEvents.proximityKilled, (data) =>
+          _proximityKilledController.add(Map<String, dynamic>.from(data as Map? ?? {})))
+
+      // 세션 전체 탈락 브로드캐스트
+      ..on(SocketEvents.playerEliminated, (data) =>
+          _playerEliminatedController.add(Map<String, dynamic>.from(data as Map? ?? {})))
+
+      // 게임 상태 갱신
+      ..on(SocketEvents.gameStateUpdate, (data) =>
+          _gameStateController.add(Map<String, dynamic>.from(data as Map? ?? {})))
+
+      // 게임 종료
+      ..on(SocketEvents.gameOver, (data) =>
+          _gameOverController.add(Map<String, dynamic>.from(data as Map? ?? {})));
   }
 
   // ... (아래 joinSession, sendLocation 등 나머지 코드는 기존과 완벽히 동일하므로 생략하지 않고 그대로 유지하세요) ...
@@ -285,6 +319,34 @@ class SocketService {
     });
   }
 
+  void emitGameStart(String sessionId) {
+    if (!_isConnected) return;
+    _socket?.emit(SocketEvents.gameStart, {'sessionId': sessionId});
+  }
+
+  void emitVoteOpen(String sessionId, {String prompt = ''}) {
+    if (!_isConnected) return;
+    _socket?.emit('vote:open', {'sessionId': sessionId, 'prompt': prompt});
+  }
+
+  void requestGameState(String sessionId) {
+    if (!_isConnected) return;
+    _socket?.emit(SocketEvents.gameRequestState, {'sessionId': sessionId});
+  }
+
+  void interactAction({
+    required String sessionId,
+    required String actionType,
+    required String targetUserId,
+  }) {
+    if (!_isConnected) return;
+    _socket?.emit(SocketEvents.actionInteract, {
+      'sessionId':    sessionId,
+      'actionType':   actionType,
+      'targetUserId': targetUserId,
+    });
+  }
+
   void sendLocationUpdate(String sessionId, double lat, double lng, String status) {
     _socket?.emit(SocketEvents.locationUpdate, {
       'sessionId': sessionId,
@@ -343,6 +405,10 @@ class SocketService {
     _connectionController.close();
     _kickedController.close();
     _roleChangedController.close();
-    _sessionExpiredController.close(); // 추가됨
+    _sessionExpiredController.close();
+    _proximityKilledController.close();
+    _playerEliminatedController.close();
+    _gameStateController.close();
+    _gameOverController.close();
   }
 }
