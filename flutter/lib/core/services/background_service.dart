@@ -2,6 +2,7 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:ui';
 import 'package:battery_plus/battery_plus.dart';
 import 'package:flutter/material.dart';
@@ -84,21 +85,68 @@ void onStart(ServiceInstance service) async {
   StreamSubscription<Position>? positionSub;
   Timer? idleTimer;
   bool isIdle = false;
+  Position? prevPos;
   final Set<String> insideGeofences = {};
   final battery = Battery();
+  String currentToken = token;
+
+  // 토큰 갱신: /auth/refresh 호출 → 새 accessToken 저장
+  Future<bool> refreshAccessToken() async {
+    try {
+      final uri = Uri.parse('$serverUrl/auth/refresh');
+      final client = HttpClient();
+      // 백엔드는 POST /auth/refresh 를 사용한다
+      final req = await client.postUrl(uri);
+      req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+      final resp = await req.close();
+      if (resp.statusCode != 200) {
+        client.close(force: true);
+        return false;
+      }
+      final body = await resp.transform(utf8.decoder).join();
+      client.close(force: true);
+      final Map<String, dynamic> data = jsonDecode(body) as Map<String, dynamic>;
+      final newAccessToken = data['accessToken'] as String?;
+      if (newAccessToken == null) return false;
+      await prefs.setString('bg_token', newAccessToken);
+      currentToken = newAccessToken;
+      return true;
+    } catch (e) {
+      debugPrint('[Background] 토큰 갱신 실패: $e');
+      return false;
+    }
+  }
 
   // 1. 소켓 연결 함수
   void connectSocket() {
     if (socket?.connected == true) return;
+    socket?.dispose();
     socket = io.io(
       serverUrl,
       io.OptionBuilder()
           .setTransports(['websocket'])
-          .setExtraHeaders({'Authorization': 'Bearer $token'})
+          .setExtraHeaders({'Authorization': 'Bearer $currentToken'})
           .enableForceNew() // 새로운 연결 강제
           .build(),
     );
     socket!.onConnect((_) => debugPrint('[Background] 소켓 연결됨'));
+    socket!.onConnectError((err) async {
+      debugPrint('[Background] 소켓 연결 에러: $err');
+      try {
+        if (err != null && err.toString().contains('AUTH_FAILED')) {
+          final ok = await refreshAccessToken();
+          if (ok) {
+            connectSocket();
+          } else {
+            debugPrint('[Background] 토큰 갱신 실패 → 서비스 종료');
+            service.stopSelf();
+          }
+        }
+      } catch (e) {
+        debugPrint('[Background] onConnectError 처리 중 예외: $e');
+        service.stopSelf();
+      }
+    });
   }
 
   // ★ 에러 해결: late 키워드 사용으로 forward reference 해결
@@ -148,11 +196,34 @@ void onStart(ServiceInstance service) async {
         return;
       }
 
+      // 2-1. 포그라운드 UI가 활성 상태면 백그라운드 송신은 건너뛴다
+      // (UI 소켓이 이미 같은 위치를 전송하므로 중복 방지)
+      try {
+        await prefs.reload();
+      } catch (_) {}
+      final bgActive = prefs.getBool('bg_active') ?? false;
+      if (bgActive) {
+        prevPos = pos;
+        return;
+      }
+
       // 3. 배터리 레벨 읽기
       int? batteryLevel;
       try {
         batteryLevel = await battery.batteryLevel;
       } catch (_) {}
+
+      // 3-1. 이전 위치와 비교해 실제 이동 여부 판정
+      String moveStatus = 'moving';
+      if (prevPos != null) {
+        final d = Geolocator.distanceBetween(
+          prevPos!.latitude,
+          prevPos!.longitude,
+          pos.latitude,
+          pos.longitude,
+        );
+        moveStatus = d < 2 ? 'stopped' : 'moving';
+      }
 
       // 4. 소켓 전송
       if (socket?.connected == true) {
@@ -164,9 +235,10 @@ void onStart(ServiceInstance service) async {
           'speed':     pos.speed.isNaN ? null : pos.speed,
           'heading':   pos.heading.isNaN ? null : pos.heading,
           'battery':   batteryLevel,
-          'status':    'moving',
+          'status':    moveStatus,
         });
       }
+      prevPos = pos;
 
       // 5. 지오펜스 판정
       _checkGeofencesInBg(pos, sessionId, prefs, insideGeofences);

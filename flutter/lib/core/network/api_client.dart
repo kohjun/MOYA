@@ -3,7 +3,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
-const _baseUrl = 'http://10.0.2.2:3000';  // 개발 서버 (배포 시 변경)
+const kApiBaseUrl = 'http://10.0.2.2:3000';  // 개발 서버 (배포 시 변경)
 
 class ApiClient {
   late final Dio _dio;
@@ -17,7 +17,7 @@ class ApiClient {
 
   ApiClient._internal() {
     _dio = Dio(BaseOptions(
-      baseUrl: _baseUrl,
+      baseUrl: kApiBaseUrl,
       connectTimeout: const Duration(seconds: 10),
       receiveTimeout: const Duration(seconds: 10),
       headers: {'Content-Type': 'application/json'},
@@ -90,7 +90,7 @@ class ApiClient {
   // Refresh Token은 HttpOnly 쿠키로 서버가 관리 → 클라이언트는 /auth/refresh만 호출
   Future<void> _refreshAccessToken() async {
     // withCredentials: true → 쿠키 자동 전송
-    final response = await Dio(BaseOptions(baseUrl: _baseUrl))
+    final response = await Dio(BaseOptions(baseUrl: kApiBaseUrl))
         .post('/auth/refresh', options: Options(extra: {'withCredentials': true}));
 
     final newAccessToken = response.data['accessToken'] as String;

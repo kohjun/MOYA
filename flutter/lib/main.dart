@@ -3,6 +3,7 @@
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'app.dart';
 import 'firebase_options.dart'; // FlutterFire CLI로 생성되는 파일
 import 'package:flutter_naver_map/flutter_naver_map.dart';
@@ -53,6 +54,15 @@ void main() async {
     await initializeBackgroundService();
   } catch (e) {
     debugPrint('백그라운드 서비스 초기화 실패: $e');
+  }
+
+  // 앱 시작 시 bg_active 플래그 초기화
+  // (크래시로 종료된 이전 세션의 stale true 값을 정리)
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('bg_active', false);
+  } catch (e) {
+    debugPrint('bg_active 초기화 실패: $e');
   }
 
   runApp(

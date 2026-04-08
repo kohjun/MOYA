@@ -12,15 +12,12 @@ import 'socket_service.dart';
 // ─────────────────────────────────────────────────────────────────────────────
 class LocationConfig {
   // 이동 중: 고정밀, 짧은 간격
+  // 포그라운드 UI 내부에서 GpsLocationService가 동작하므로 알림 설정은
+  // background_service.dart 쪽에만 둡니다.
   static final AndroidSettings androidMoving = AndroidSettings(
     accuracy: LocationAccuracy.high,
     intervalDuration: const Duration(seconds: 3),
     distanceFilter: 5,  // 5m 이상 이동 시에만 갱신
-    foregroundNotificationConfig: const ForegroundNotificationConfig(
-      notificationText: '위치를 공유하고 있습니다',
-      notificationTitle: '📍 위치 공유 중',
-      enableWakeLock: true,
-    ),
   );
 
   // 정지 중: 배터리 절약 모드
@@ -78,9 +75,9 @@ class GpsLocationService {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // 세션 ID 설정
+  // 세션 ID 설정 (null 전달 시 전송 중지)
   // ─────────────────────────────────────────────────────────────────────────
-  void setSessionId(String sessionId) {
+  void setSessionId(String? sessionId) {
     _sessionId = sessionId;
   }
 
@@ -175,14 +172,25 @@ class GpsLocationService {
   void _startStatusDetection() {
     _statusTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
       if (_lastPosition == null) return;
+      final sessionId = _sessionId;
+      if (sessionId == null) return;
 
       // 30초 동안 이동이 없으면 상태 업데이트
       int? battery;
       try { battery = await _battery.batteryLevel; } catch (_) {}
 
-      SocketService().updateStatus(
-        _isMoving ? 'moving' : 'stopped',
-        battery: battery,
+      final pos = _lastPosition!;
+      SocketService().sendLocationWithSession(
+        sessionId: sessionId,
+        lat:       pos.latitude,
+        lng:       pos.longitude,
+        accuracy:  pos.accuracy,
+        altitude:  pos.altitude,
+        speed:     pos.speed.isNaN ? null : pos.speed,
+        heading:   pos.heading.isNaN ? null : pos.heading,
+        source:    'gps',
+        battery:   battery,
+        status:    _isMoving ? 'moving' : 'stopped',
       );
     });
   }

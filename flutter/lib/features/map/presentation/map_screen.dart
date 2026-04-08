@@ -454,6 +454,7 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
     // 4. GPS 추적 시작
     try {
       await _gps.startTracking();
+      _gps.setSessionId(_sessionId);
       _myPositionSub = _gps.positionStream.listen((pos) {
         state = state.copyWith(myPosition: pos);
 
@@ -540,11 +541,12 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
     // 6. 백그라운드 서비스용 데이터 저장 및 시작
     try {
       await prefs.setString('bg_session_id', _sessionId);
-      await prefs.setString('bg_server_url', 'http://10.0.2.2:3000');
+      await prefs.setString('bg_server_url', kApiBaseUrl);
       final token = await ApiClient().getAccessToken();
       if (token != null) {
         await prefs.setString('bg_token', token);
       }
+      await prefs.setBool('bg_active', true);
       final bgService = FlutterBackgroundService();
       await bgService.startService();
       debugPrint('[Background] 포그라운드 서비스 시작됨');
@@ -696,9 +698,11 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
     _playerEliminatedSub?.cancel();
     _gameStateSub?.cancel();
     _gameOverSub?.cancel();
+    _gps.setSessionId(null);
     _gps.stopTracking();
     _socket.disconnect();
     // 방에서 나가거나 강퇴당하면 백그라운드 서비스를 종료합니다.
+    SharedPreferences.getInstance().then((p) => p.setBool('bg_active', false));
     FlutterBackgroundService().invoke('stopService');
     debugPrint('[Background] 포그라운드 서비스 종료 신호 발송');
     super.dispose();
@@ -935,7 +939,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                   foregroundColor: Colors.white,
                   icon: Icon(activeModules.contains('tag')
                       ? Icons.touch_app
-                      : Icons.skull),
+                      : Icons.dangerous),
                   label: Text(
                     activeModules.contains('tag') ? '태그' : '제거',
                     style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
@@ -1875,7 +1879,7 @@ class _MemberChip extends StatelessWidget {
                         color: Colors.black.withValues(alpha: 0.55),
                         shape: BoxShape.circle,
                       ),
-                      child: const Icon(Icons.skull, size: 16, color: Colors.white),
+                      child: const Icon(Icons.dangerous, size: 16, color: Colors.white),
                     )
                   else
                     // 일반: 상태 점 (bottomRight)
