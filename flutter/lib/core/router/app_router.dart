@@ -13,6 +13,8 @@ import '../../features/history/presentation/history_screen.dart';
 import '../../features/geofence/presentation/geofence_screen.dart';
 import '../../features/settings/presentation/settings_screen.dart';
 import '../../features/session/presentation/member_management_screen.dart';
+import '../../features/game/presentation/game_role_screen.dart';
+import '../../features/game/presentation/game_result_screen.dart';
 
 // 라우트 경로 상수
 abstract class AppRoutes {
@@ -87,6 +89,21 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (context, state) {
           final sessionId = state.pathParameters['sessionId']!;
           return MemberManagementScreen(sessionId: sessionId);
+        },
+      ),
+      GoRoute(
+        path: '/game/:sessionId/role',
+        builder: (context, state) {
+          final sessionId = state.pathParameters['sessionId']!;
+          return GameRoleScreen(sessionId: sessionId);
+        },
+      ),
+      GoRoute(
+        path: '/game/:sessionId/result/:winner',
+        builder: (context, state) {
+          final sessionId = state.pathParameters['sessionId']!;
+          final winner    = state.pathParameters['winner']!;
+          return GameResultScreen(sessionId: sessionId, winner: winner);
         },
       ),
     ],

@@ -18,6 +18,10 @@ import '../../../core/network/api_client.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import '../../../core/services/notification_service.dart';
 import '../../geofence/data/geofence_repository.dart';
+import '../../game/providers/game_provider.dart';
+import '../../game/data/game_models.dart' as am_game;
+import '../../game/presentation/game_meeting_screen.dart';
+import '../../game/presentation/widgets/ai_chat_panel.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 멤버 실시간 위치 상태
@@ -765,8 +769,24 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       },
     );
 
-    final mapState = ref.watch(mapSessionProvider(widget.sessionId));
-    final authUser = ref.watch(authProvider).valueOrNull;
+    // 게임 종료 감지 → 결과 화면으로 이동
+    ref.listen<am_game.AmongUsGameState>(
+      gameProvider(widget.sessionId),
+      (prev, next) {
+        if (next.gameOverWinner != null && prev?.gameOverWinner == null) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) {
+              context.go(
+                  '/game/${widget.sessionId}/result/${next.gameOverWinner}');
+            }
+          });
+        }
+      },
+    );
+
+    final mapState  = ref.watch(mapSessionProvider(widget.sessionId));
+    final authUser  = ref.watch(authProvider).valueOrNull;
+    final amgState  = ref.watch(gameProvider(widget.sessionId));
 
     // 활성 모듈 목록 (세션 캐시에서 조회)
     final activeModules = getSessionModules(ref).toSet();
@@ -1229,6 +1249,93 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                     ],
                   ),
                 ),
+              ),
+            ),
+
+          // ── 역할 뱃지 (우상단, 게임 시작 후) ───────────────────────────────
+          if (amgState.myRole != null)
+            Positioned(
+              top: 50,
+              right: 16,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: amgState.myRole!.isImpostor
+                      ? Colors.red.withValues(alpha: 0.9)
+                      : Colors.green.withValues(alpha: 0.9),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  amgState.myRole!.isImpostor ? '😈 임포스터' : '👨‍🚀 크루원',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+            ),
+
+          // ── 긴급 회의 버튼 (좌하단, 살아있을 때만) ──────────────────────
+          if (amgState.isStarted && amgState.isAlive)
+            Positioned(
+              bottom: 120,
+              left: 16,
+              child: FloatingActionButton.extended(
+                heroTag: 'emergency',
+                backgroundColor: Colors.orange,
+                onPressed: () => ref
+                    .read(gameProvider(widget.sessionId).notifier)
+                    .sendEmergency(),
+                icon: const Icon(Icons.warning_amber, color: Colors.white),
+                label: const Text(
+                  '긴급 회의',
+                  style: TextStyle(
+                      color: Colors.white, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ),
+
+          // ── 킬 버튼 (우하단, 임포스터만) ────────────────────────────────
+          if (amgState.myRole?.isImpostor == true && amgState.isAlive)
+            Positioned(
+              bottom: 120,
+              right: 16,
+              child: FloatingActionButton.extended(
+                heroTag: 'kill_impostor',
+                backgroundColor: Colors.red,
+                onPressed: () {
+                  // 추후 근접 타겟 선택 다이얼로그 추가
+                },
+                icon: const Icon(Icons.close, color: Colors.white),
+                label: const Text(
+                  '킬',
+                  style: TextStyle(
+                      color: Colors.white, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ),
+
+          // ── AI 채팅 패널 (게임 시작 후) ─────────────────────────────────
+          if (amgState.isStarted)
+            Positioned(
+              bottom: 0,
+              left: 0,
+              right: 0,
+              child: AIChatPanel(sessionId: widget.sessionId),
+            ),
+
+          // ── 회의 화면 오버레이 ──────────────────────────────────────────
+          if (amgState.meetingPhase != 'none')
+            Positioned.fill(
+              child: GameMeetingScreen(
+                sessionId: widget.sessionId,
+                memberNames: {
+                  for (final e in mapState.members.entries)
+                    e.key: e.value.nickname,
+                },
+                myUserId: authUser?.id ?? '',
               ),
             ),
 

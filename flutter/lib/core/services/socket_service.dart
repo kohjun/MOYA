@@ -440,4 +440,73 @@ class SocketService {
     _gameStateController.close();
     _gameOverController.close();
   }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // 게임 이벤트 상수 (Among Us 플러그인)
+  // ─────────────────────────────────────────────────────────────────────────
+  static const String gameStarted         = 'game:started';
+  static const String gameRoleAssigned    = 'game:role_assigned';
+  static const String gameKillConfirmed   = 'game:kill_confirmed';
+  static const String gameBodyFound       = 'game:body_found';
+  static const String gameMeetingStarted  = 'game:meeting_started';
+  static const String gameMeetingTick     = 'game:meeting_tick';
+  static const String gameVotingStarted   = 'game:voting_started';
+  static const String gameVoteSubmitted   = 'game:vote_submitted';
+  static const String gamePreVoteSubmitted = 'game:pre_vote_submitted';
+  static const String gameVoteResult      = 'game:vote_result';
+  static const String gameMeetingEnded    = 'game:meeting_ended';
+  static const String gameAiMessage       = 'game:ai_message';
+  static const String gameAiReply         = 'game:ai_reply';
+  static const String gameMissionProgress = 'game:mission_progress';
+  static const String gameOver            = 'game:over';
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // 게임 액션 메서드
+  // ─────────────────────────────────────────────────────────────────────────
+  void startGame(String sessionId) {
+    _socket?.emit('game:start', {'sessionId': sessionId});
+  }
+
+  void sendKill(String sessionId, String targetUserId) {
+    _socket?.emit('game:kill', {'sessionId': sessionId, 'targetUserId': targetUserId});
+  }
+
+  void sendEmergencyMeeting(String sessionId) {
+    _socket?.emit('game:emergency', {'sessionId': sessionId});
+  }
+
+  void sendReport(String sessionId, String bodyId) {
+    _socket?.emit('game:report', {'sessionId': sessionId, 'bodyId': bodyId});
+  }
+
+  void sendVote(String sessionId, String targetId, Function(Map) callback) {
+    _socket?.emitWithAck(
+      'game:vote',
+      {'sessionId': sessionId, 'targetId': targetId},
+      ack: (data) => callback(data as Map),
+    );
+  }
+
+  void sendMissionComplete(String sessionId, String missionId) {
+    _socket?.emit('game:mission_complete',
+        {'sessionId': sessionId, 'missionId': missionId});
+  }
+
+  void sendAiQuestion(String sessionId, String question, Function(Map) callback) {
+    _socket?.emitWithAck(
+      'game:ai_ask',
+      {'sessionId': sessionId, 'question': question},
+      ack: (data) => callback(data as Map),
+    );
+  }
+
+  Stream<Map<String, dynamic>> onGameEvent(String event) {
+    final controller = StreamController<Map<String, dynamic>>.broadcast();
+    _socket?.on(event, (data) {
+      if (data is Map) {
+        controller.add(Map<String, dynamic>.from(data));
+      }
+    });
+    return controller.stream;
+  }
 }

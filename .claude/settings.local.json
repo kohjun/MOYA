@@ -17,7 +17,17 @@
       "Bash(find /c/LBS/flutter/lib/features/map -type f -name *.dart)",
       "Bash(find /c/LBS/flutter/lib/core/router -type f -name *.dart)",
       "Bash(dart analyze:*)",
-      "Bash(flutter analyze:*)"
+      "Bash(flutter analyze:*)",
+      "Bash(node src/config/migrate.js)",
+      "Bash(ls /cmd)",
+      "Read(//c//**)",
+      "Bash(ls /drives/)",
+      "Bash(ls /cygdrive/)",
+      "Bash(node:*)",
+      "Bash(flutter run:*)",
+      "Bash(flutter emulators:*)",
+      "Bash(adb devices:*)",
+      "Bash(flutter devices:*)"
     ]
   }
 }

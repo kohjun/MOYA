@@ -6,6 +6,11 @@ import * as locationService from '../services/locationService.js';
 import * as sessionService from '../services/sessionService.js';
 import { sendSosAlert, sendGeofenceAlert } from '../services/fcmService.js';
 import { checkGeofences } from '../services/geofenceService.js';
+import VoteSystem, { VOTE_PHASE } from '../game/VoteSystem.js';
+import * as MissionSystem from '../game/MissionSystem.js';
+import KillCooldownManager from '../game/KillCooldownManager.js';
+import EventBus from '../game/EventBus.js';
+import * as AIDirector from '../ai/AIDirector.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Socket.IO 이벤트 상수 (클라이언트와 공유하는 프로토콜)
@@ -45,6 +50,30 @@ export const EVENTS = {
   VOTE_CAST:          'vote:cast',
   VOTE_RESULT:        'vote:result',
   ERROR:              'error',
+
+  // Amongus Client → Server
+  GAME_KILL:          'game:kill',
+  GAME_REPORT:        'game:report',
+  GAME_EMERGENCY:     'game:emergency',
+  GAME_VOTE:          'game:vote',
+  GAME_MISSION_DONE:  'game:mission_complete',
+  GAME_AI_ASK:        'game:ai_ask',
+
+  // Amongus Server → Client
+  GAME_STARTED:            'game:started',
+  GAME_ROLE_ASSIGNED:      'game:role_assigned',
+  GAME_KILL_CONFIRMED:     'game:kill_confirmed',
+  GAME_BODY_FOUND:         'game:body_found',
+  GAME_MEETING_STARTED:    'game:meeting_started',
+  GAME_MEETING_TICK:       'game:meeting_tick',
+  GAME_VOTING_STARTED:     'game:voting_started',
+  GAME_VOTE_SUBMITTED:     'game:vote_submitted',
+  GAME_PRE_VOTE_SUBMITTED: 'game:pre_vote_submitted',
+  GAME_VOTE_RESULT:        'game:vote_result',
+  GAME_MEETING_ENDED:      'game:meeting_ended',
+  GAME_AI_MESSAGE:         'game:ai_message',
+  GAME_AI_REPLY:           'game:ai_reply',
+  GAME_MISSION_PROGRESS:   'game:mission_progress',
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -395,60 +424,235 @@ export const createSocketServer = (httpServer) => {
     });
 
     // ── game:start ────────────────────────────────────────────────────
-    // 호스트만 게임을 시작할 수 있음
     socket.on(EVENTS.GAME_START, async ({ sessionId: sid } = {}) => {
       const sessionId = sid || socket.currentSessionId;
-      if (!sessionId) {
-        return socket.emit(EVENTS.MODULE_ERROR, { code: 'MISSING_SESSION_ID' });
-      }
-
+      if (!sessionId) return;
       try {
         const session = await sessionService.getSession(sessionId);
-        if (!session) {
-          return socket.emit(EVENTS.MODULE_ERROR, { code: 'SESSION_NOT_FOUND' });
-        }
-
-        if (session.host_user_id !== userId) {
-          return socket.emit(EVENTS.MODULE_ERROR, { code: 'PERMISSION_DENIED' });
-        }
-
-        // 현재 세션 멤버 전원을 생존자로 등록
+        if (!session || session.host_user_id !== userId) return;
         const members = await sessionService.getSessionMembers(sessionId);
-        const alivePlayerIds = members.map((m) => m.user_id);
+        const aliveMembers = members.filter(m => !m.left_at);
 
+        // 임포스터 랜덤 배정
+        const impostorCount = session.impostor_count || 1;
+        const shuffled = [...aliveMembers].sort(() => Math.random() - 0.5);
+        const impostors = new Set(shuffled.slice(0, impostorCount).map(m => m.user_id));
+
+        // Redis에 게임 상태 저장
         const gameState = {
-          status:         'in_progress',
-          startedAt:      Date.now(),
-          alivePlayerIds,
+          status: 'playing',
+          impostors: [...impostors],
+          aliveMembers: aliveMembers.map(m => m.user_id),
+          killLog: [],
+          meetingCount: 0,
         };
+        await redisClient.set(`game:${sessionId}`, JSON.stringify(gameState));
+        await redisClient.set(`game:${sessionId}:status`, 'playing');
 
-        await redisClient.set(
-          `game:${sessionId}`,
-          JSON.stringify(gameState),
-          { EX: 86400 }
-        );
-
-        io.to(`session:${sessionId}`).emit(EVENTS.GAME_STATE_UPDATE, {
-          sessionId,
-          status:         gameState.status,
-          startedAt:      gameState.startedAt,
-          aliveCount:     alivePlayerIds.length,
-          alivePlayerIds,
-        });
-
-        // ── Tag 모듈: 초기 태거 랜덤 지정 ──────────────────────────────
-        if ((session.active_modules || []).includes('tag')) {
-          const taggerId = alivePlayerIds[Math.floor(Math.random() * alivePlayerIds.length)];
-          await redisClient.set(`tag:${sessionId}:tagger`, taggerId, { EX: 86400 });
-          io.to(`session:${sessionId}`).emit(EVENTS.TAG_ASSIGNED, {
-            taggerId,
-            sessionId,
+        // 각 플레이어에게 역할 개별 전송
+        for (const member of aliveMembers) {
+          const isImpostor = impostors.has(member.user_id);
+          const role = isImpostor ? 'impostor' : 'crew';
+          const team = isImpostor ? 'impostor' : 'crew';
+          io.to(`user:${member.user_id}`).emit(EVENTS.GAME_ROLE_ASSIGNED, {
+            role,
+            team,
+            impostors: isImpostor ? [...impostors] : [],
           });
         }
 
+        // 미션 배정
+        await MissionSystem.assignMissions(session, aliveMembers);
+
+        io.to(`session:${sessionId}`).emit(EVENTS.GAME_STARTED, {
+          playerCount: aliveMembers.length,
+          impostorCount,
+        });
       } catch (err) {
         console.error('[WS] game:start error:', err);
-        socket.emit(EVENTS.MODULE_ERROR, { code: 'INTERNAL_ERROR' });
+      }
+    });
+
+    // ── game:kill ─────────────────────────────────────────────────────
+    socket.on(EVENTS.GAME_KILL, async ({ sessionId: sid, targetUserId }) => {
+      const sessionId = sid || socket.currentSessionId;
+      if (!sessionId || !targetUserId) return;
+      try {
+        const gameRaw = await redisClient.get(`game:${sessionId}`);
+        if (!gameRaw) return;
+        const gameState = JSON.parse(gameRaw);
+
+        if (!gameState.impostors.includes(userId)) return;
+        if (!gameState.aliveMembers.includes(targetUserId)) return;
+        if (!KillCooldownManager.canKill(sessionId, userId)) {
+          return socket.emit(EVENTS.ERROR, { code: 'KILL_COOLDOWN' });
+        }
+
+        // 킬 처리
+        gameState.aliveMembers = gameState.aliveMembers.filter(id => id !== targetUserId);
+        gameState.killLog.push({ killerId: userId, victimId: targetUserId, at: Date.now() });
+        await redisClient.set(`game:${sessionId}`, JSON.stringify(gameState));
+
+        KillCooldownManager.setKillCooldown(sessionId, userId, 30);
+
+        io.to(`session:${sessionId}`).emit(EVENTS.GAME_KILL_CONFIRMED, {
+          victimId: targetUserId,
+        });
+        socket.emit(EVENTS.GAME_KILL_CONFIRMED, { ok: true });
+
+        // 승리 조건 체크
+        const aliveImpostors = gameState.impostors.filter(id => gameState.aliveMembers.includes(id));
+        const aliveCrew = gameState.aliveMembers.filter(id => !gameState.impostors.includes(id));
+        if (aliveImpostors.length === 0) {
+          io.to(`session:${sessionId}`).emit(EVENTS.GAME_OVER, { winner: 'crew', reason: 'impostors_ejected' });
+        } else if (aliveImpostors.length >= aliveCrew.length) {
+          io.to(`session:${sessionId}`).emit(EVENTS.GAME_OVER, { winner: 'impostor' });
+        }
+      } catch (err) {
+        console.error('[WS] game:kill error:', err);
+      }
+    });
+
+    // ── game:emergency ────────────────────────────────────────────────
+    socket.on(EVENTS.GAME_EMERGENCY, async ({ sessionId: sid } = {}) => {
+      const sessionId = sid || socket.currentSessionId;
+      if (!sessionId) return;
+      try {
+        const gameRaw = await redisClient.get(`game:${sessionId}`);
+        if (!gameRaw) return;
+        const gameState = JSON.parse(gameRaw);
+        if (!gameState.aliveMembers.includes(userId)) return;
+
+        const session = await sessionService.getSession(sessionId);
+        session.aliveMembers = gameState.aliveMembers.map(id => ({ userId: id }));
+
+        VoteSystem.startMeeting(session, {
+          callerId: userId,
+          bodyId:   null,
+          reason:   'emergency',
+        });
+      } catch (err) {
+        console.error('[WS] game:emergency error:', err);
+      }
+    });
+
+    // ── game:report ───────────────────────────────────────────────────
+    socket.on(EVENTS.GAME_REPORT, async ({ sessionId: sid, bodyId }) => {
+      const sessionId = sid || socket.currentSessionId;
+      if (!sessionId || !bodyId) return;
+      try {
+        const gameRaw = await redisClient.get(`game:${sessionId}`);
+        if (!gameRaw) return;
+        const gameState = JSON.parse(gameRaw);
+        if (!gameState.aliveMembers.includes(userId)) return;
+        if (gameState.aliveMembers.includes(bodyId)) return; // 살아있으면 신고 불가
+
+        const session = await sessionService.getSession(sessionId);
+        session.aliveMembers = gameState.aliveMembers.map(id => ({ userId: id }));
+
+        VoteSystem.startMeeting(session, {
+          callerId: userId,
+          bodyId,
+          reason:   'report',
+        });
+      } catch (err) {
+        console.error('[WS] game:report error:', err);
+      }
+    });
+
+    // ── game:vote ─────────────────────────────────────────────────────
+    socket.on(EVENTS.GAME_VOTE, ({ sessionId: sid, targetId }, cb) => {
+      const sessionId = sid || socket.currentSessionId;
+      const respond = typeof cb === 'function' ? cb : () => {};
+      if (!sessionId || !targetId) return respond({ ok: false, error: 'MISSING_FIELDS' });
+      try {
+        const result = VoteSystem.submitVote(sessionId, userId, targetId);
+        respond({ ok: true, ...result });
+      } catch (err) {
+        respond({ ok: false, error: err.message });
+      }
+    });
+
+    // ── game:mission_complete ─────────────────────────────────────────
+    socket.on(EVENTS.GAME_MISSION_DONE, async ({ sessionId: sid, missionId }) => {
+      const sessionId = sid || socket.currentSessionId;
+      if (!sessionId || !missionId) return;
+      try {
+        const result = await MissionSystem.completeMission(sessionId, userId, missionId);
+        if (!result) return;
+
+        socket.emit(EVENTS.GAME_MISSION_PROGRESS, {
+          missionId,
+          ...await MissionSystem.getProgressBar(sessionId),
+        });
+        io.to(`session:${sessionId}`).emit(EVENTS.GAME_MISSION_PROGRESS,
+          await MissionSystem.getProgressBar(sessionId)
+        );
+
+        if (result.allDone) {
+          io.to(`session:${sessionId}`).emit(EVENTS.GAME_OVER, { winner: 'crew', reason: 'all_missions_done' });
+        }
+      } catch (err) {
+        console.error('[WS] game:mission_complete error:', err);
+      }
+    });
+
+    // ── game:ai_ask ───────────────────────────────────────────────────
+    socket.on(EVENTS.GAME_AI_ASK, async ({ sessionId: sid, question }, cb) => {
+      const sessionId = sid || socket.currentSessionId;
+      const respond = typeof cb === 'function' ? cb : () => {};
+
+      if (!question || question.trim().length === 0) {
+        return respond({ ok: false, error: '질문을 입력해주세요.' });
+      }
+      if (question.length > 200) {
+        return respond({ ok: false, error: '질문이 너무 깁니다. (최대 200자)' });
+      }
+
+      try {
+        const gameRaw = await redisClient.get(`game:${sessionId}`);
+        if (!gameRaw) return respond({ ok: false, error: '게임이 시작되지 않았습니다.' });
+
+        const gameState  = JSON.parse(gameRaw);
+        const isImpostor = gameState.impostors.includes(userId);
+
+        // AIDirector.ask()에 넘길 room/player 형태로 래핑
+        const roomLike = {
+          roomId:    sessionId,
+          gameType:  'among_us',
+          status:    gameState.status,
+          killLog:   gameState.killLog || [],
+          players:   new Map(
+            gameState.aliveMembers.map(id => [id, {
+              userId: id,
+              isAlive: true,
+              team: gameState.impostors.includes(id) ? 'impostor' : 'crew',
+            }])
+          ),
+        };
+
+        const playerLike = {
+          userId,
+          nickname:  socket.user.nickname,
+          team:      isImpostor ? 'impostor' : 'crew',
+          roleId:    isImpostor ? 'impostor' : 'crew',
+          isAlive:   gameState.aliveMembers.includes(userId),
+          tasks:     [],
+        };
+
+        respond({ ok: true });
+
+        const { answer, sources } = await AIDirector.ask(roomLike, playerLike, question);
+
+        socket.emit(EVENTS.GAME_AI_REPLY, { question, answer, sources });
+
+      } catch (err) {
+        console.error('[WS] game:ai_ask error:', err);
+        socket.emit(EVENTS.GAME_AI_REPLY, {
+          question,
+          answer: '죄송해요, 잠시 후 다시 물어봐주세요! 🙏',
+          sources: [],
+        });
       }
     });
 
@@ -687,6 +891,61 @@ export const createSocketServer = (httpServer) => {
           timestamp: Date.now(),
         });
       }
+    });
+  });
+
+  // ── VoteSystem EventBus 구독 ──────────────────────────────────────────
+  EventBus.on('meeting_started', async ({ session, voteSession }) => {
+    io.to(`session:${session.id}`).emit(EVENTS.GAME_MEETING_STARTED, {
+      callerId:       voteSession.callerId,
+      bodyId:         voteSession.bodyId,
+      reason:         voteSession.reason,
+      discussionTime: voteSession.discussionTime,
+    });
+
+    // AI 회의 시작 멘트
+    try {
+      const caller = { nickname: voteSession.callerId };
+      const body   = voteSession.bodyId ? { nickname: voteSession.bodyId, zone: '' } : null;
+      const msg = await AIDirector.onMeeting(session, caller, voteSession.reason, body);
+      if (msg) io.to(`session:${session.id}`).emit(EVENTS.GAME_AI_MESSAGE, {
+        type: 'announcement', message: msg,
+      });
+    } catch (e) {
+      console.error('[AI] 회의 안내 실패:', e.message);
+    }
+  });
+
+  EventBus.on('meeting_tick', ({ session, phase, remaining, earlyEnd }) => {
+    io.to(`session:${session.id}`).emit(EVENTS.GAME_MEETING_TICK, { phase, remaining, earlyEnd });
+  });
+
+  EventBus.on('voting_started', ({ session, voteSession }) => {
+    io.to(`session:${session.id}`).emit(EVENTS.GAME_VOTING_STARTED, {
+      voteTime: voteSession.voteTime,
+    });
+  });
+
+  EventBus.on('vote_result', async ({ session, result, ejected }) => {
+    io.to(`session:${session.id}`).emit(EVENTS.GAME_VOTE_RESULT, {
+      ...result,
+      ejected: ejected ? { userId: ejected.userId } : null,
+    });
+
+    // AI 투표 결과 해설
+    try {
+      const msg = await AIDirector.onVoteResult(session, result, ejected);
+      if (msg) io.to(`session:${session.id}`).emit(EVENTS.GAME_AI_MESSAGE, {
+        type: 'vote_result', message: msg,
+      });
+    } catch (e) {
+      console.error('[AI] 투표 결과 해설 실패:', e.message);
+    }
+  });
+
+  EventBus.on('meeting_ended', ({ session }) => {
+    io.to(`session:${session.id}`).emit(EVENTS.GAME_MEETING_ENDED, {
+      message: '게임으로 돌아갑니다.',
     });
   });
 
