@@ -23,7 +23,6 @@ const migrations = [
 
   // ─── users 테이블에 fcm_token 및 current_session_id 컬럼 추가 ──────────────
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS fcm_token VARCHAR(500)`,
-  `ALTER TABLE users ADD COLUMN IF NOT EXISTS current_session_id UUID REFERENCES sessions(id) ON DELETE SET NULL`,
 
   // ─── Refresh Token 저장소 ─────────────────────────────────────────
   `CREATE TABLE IF NOT EXISTS refresh_tokens (
@@ -50,6 +49,7 @@ const migrations = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_sessions_code ON sessions(session_code)`,
   `CREATE INDEX IF NOT EXISTS idx_sessions_host  ON sessions(host_user_id)`,
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS current_session_id UUID REFERENCES sessions(id) ON DELETE SET NULL`,
 
   // ─── 세션 참가자 테이블 ───────────────────────────────────────────
   `CREATE TABLE IF NOT EXISTS session_members (
@@ -191,6 +191,7 @@ const migrations = [
 
   // ─── sessions 게임 설정 컬럼 추가 ────────────────────────
   `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS game_type VARCHAR(50) DEFAULT 'among_us'`,
+  `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS max_members INTEGER DEFAULT 50`,
   `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS kill_cooldown INTEGER DEFAULT 30`,
   `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS discussion_time INTEGER DEFAULT 90`,
   `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS vote_time INTEGER DEFAULT 30`,

@@ -32,6 +32,8 @@ const generateSessionCode = async () => {
 export const createSession = async (hostUserId, {
   name,
   activeModules   = [],
+  durationHours,
+  maxMembers,
   gameType,
   impostorCount,
   killCooldown,
@@ -40,26 +42,28 @@ export const createSession = async (hostUserId, {
   missionPerCrew,
 } = {}) => {
   const code = await generateSessionCode();
+  const expiresAt = new Date(Date.now() + ((durationHours ?? 24) * 60 * 60 * 1000));
 
   const rows = await withTransaction(async (client) => {
     // 세션 생성 (게임 설정 컬럼 포함)
     const session = await client.query(
       `INSERT INTO sessions
-         (host_user_id, session_code, name, active_modules,
-          game_type, impostor_count, kill_cooldown, discussion_time, vote_time, mission_per_crew)
-       VALUES ($1, $2, $3, $4,
-               COALESCE($5, 'among_us'), COALESCE($6, 1), COALESCE($7, 30),
-               COALESCE($8, 90), COALESCE($9, 30), COALESCE($10, 3))
+         (host_user_id, session_code, name, expires_at, active_modules,
+          game_type, max_members, impostor_count, kill_cooldown, discussion_time, vote_time, mission_per_crew)
+       VALUES ($1, $2, $3, $4, $5,
+               COALESCE($6, 'among_us'), COALESCE($7, 50), COALESCE($8, 1), COALESCE($9, 30),
+               COALESCE($10, 90), COALESCE($11, 30), COALESCE($12, 3))
        RETURNING id, session_code, name, status, created_at, expires_at,
-                 active_modules, module_configs,
+                 active_modules, module_configs, max_members,
                  game_type, impostor_count, kill_cooldown, discussion_time, vote_time, mission_per_crew`,
       [
-        hostUserId, code, name || null, activeModules,
-        gameType      ?? null,
-        impostorCount ?? null,
-        killCooldown  ?? null,
+        hostUserId, code, name || null, expiresAt, activeModules,
+        gameType       ?? null,
+        maxMembers     ?? null,
+        impostorCount  ?? null,
+        killCooldown   ?? null,
         discussionTime ?? null,
-        voteTime      ?? null,
+        voteTime       ?? null,
         missionPerCrew ?? null,
       ]
     );
@@ -91,7 +95,7 @@ export const joinSession = async (userId, sessionCode) => {
 
   if (!session) {
     const { rows } = await query(
-      `SELECT id, host_user_id, session_code, name, status, expires_at
+      `SELECT id, host_user_id, session_code, name, status, expires_at, max_members
        FROM sessions
        WHERE session_code = $1 AND status = 'active' AND expires_at > NOW()`,
       [sessionCode.toUpperCase()]
@@ -102,6 +106,16 @@ export const joinSession = async (userId, sessionCode) => {
 
   if (session.status !== 'active') throw new Error('SESSION_ENDED');
   if (new Date(session.expires_at) < new Date()) throw new Error('SESSION_EXPIRED');
+
+  const { rows: memberCountRows } = await query(
+    `SELECT COUNT(*)::int AS member_count
+     FROM session_members
+     WHERE session_id = $1 AND left_at IS NULL`,
+    [session.id]
+  );
+  if (memberCountRows[0]?.member_count >= (session.max_members ?? 50)) {
+    throw new Error('SESSION_FULL');
+  }
 
   // 이미 참가 중인지 확인
   const { rows: existing } = await query(
@@ -272,7 +286,7 @@ export const kickMember = async (requesterId, sessionId, targetUserId) => {
 export const getMySessions = async (userId) => {
   const { rows } = await query(
     `SELECT s.id, s.session_code, s.name, s.status,
-            s.created_at, s.expires_at, s.active_modules, s.module_configs,
+            s.created_at, s.expires_at, s.active_modules, s.module_configs, s.max_members,
             s.host_user_id = $1 AS is_host,
             (SELECT COUNT(*) FROM session_members sm2
              WHERE sm2.session_id = s.id AND sm2.left_at IS NULL) AS member_count
@@ -294,7 +308,7 @@ export const getSession = async (sessionId) => {
 
   const { rows } = await query(
     `SELECT id, host_user_id, session_code, name, status,
-            created_at, expires_at, ended_at, active_modules, module_configs
+            created_at, expires_at, ended_at, active_modules, module_configs, max_members
      FROM sessions
      WHERE id = $1`,
     [sessionId]

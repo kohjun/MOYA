@@ -386,6 +386,7 @@ class HomeScreen extends ConsumerWidget {
   }
 
   // ── 로그아웃 확인 ─────────────────────────────────────────────────────────
+  // ignore: unused_element
   void _confirmLogout(BuildContext context, WidgetRef ref) {
     showDialog(
       context: context,

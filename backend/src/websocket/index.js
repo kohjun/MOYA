@@ -96,6 +96,32 @@ export const SESSION_TYPES = {
   location: { modules: ['mission', 'item'] },
 };
 
+const normalizeGameState = (rawGameState = {}) => {
+  const alivePlayerIds = Array.isArray(rawGameState.alivePlayerIds)
+    ? rawGameState.alivePlayerIds
+    : Array.isArray(rawGameState.aliveMembers)
+      ? rawGameState.aliveMembers
+      : [];
+
+  return {
+    status: rawGameState.status === 'playing'
+      ? 'in_progress'
+      : (rawGameState.status ?? 'in_progress'),
+    startedAt: rawGameState.startedAt ?? Date.now(),
+    finishedAt: rawGameState.finishedAt ?? null,
+    impostors: Array.isArray(rawGameState.impostors) ? rawGameState.impostors : [],
+    alivePlayerIds,
+    killLog: Array.isArray(rawGameState.killLog) ? rawGameState.killLog : [],
+    meetingCount: Number.isInteger(rawGameState.meetingCount) ? rawGameState.meetingCount : 0,
+  };
+};
+
+const saveGameState = async (sessionId, rawGameState, ttlSeconds = 86400) => {
+  const normalized = normalizeGameState(rawGameState);
+  await redisClient.set(`game:${sessionId}`, JSON.stringify(normalized), { EX: ttlSeconds });
+  return normalized;
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // io 인스턴스 참조 (routes에서 WebSocket 이벤트 발행 시 사용)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -380,7 +406,7 @@ export const createSocketServer = (httpServer) => {
           // 게임 상태 갱신 (게임이 진행 중인 경우만)
           const gameRaw = await redisClient.get(`game:${sessionId}`);
           if (gameRaw) {
-            const gameState = JSON.parse(gameRaw);
+            const gameState = normalizeGameState(JSON.parse(gameRaw));
             if (gameState.status === 'in_progress') {
               gameState.alivePlayerIds = gameState.alivePlayerIds.filter(
                 (id) => id !== targetUserId
@@ -390,11 +416,7 @@ export const createSocketServer = (httpServer) => {
                 // 마지막 생존자 → 게임 종료
                 gameState.status = 'finished';
                 gameState.finishedAt = Date.now();
-                await redisClient.set(
-                  `game:${sessionId}`,
-                  JSON.stringify(gameState),
-                  { EX: 86400 }
-                );
+                await saveGameState(sessionId, gameState);
                 io.to(`session:${sessionId}`).emit(EVENTS.GAME_OVER, {
                   winnerId:  gameState.alivePlayerIds[0],
                   sessionId,
@@ -402,11 +424,7 @@ export const createSocketServer = (httpServer) => {
                 });
               } else {
                 // 게임 계속 진행
-                await redisClient.set(
-                  `game:${sessionId}`,
-                  JSON.stringify(gameState),
-                  { EX: 86400 }
-                );
+                await saveGameState(sessionId, gameState);
                 io.to(`session:${sessionId}`).emit(EVENTS.GAME_STATE_UPDATE, {
                   sessionId,
                   status:         gameState.status,
@@ -440,14 +458,15 @@ export const createSocketServer = (httpServer) => {
 
         // Redis에 게임 상태 저장
         const gameState = {
-          status: 'playing',
+          status: 'in_progress',
+          startedAt: Date.now(),
           impostors: [...impostors],
-          aliveMembers: aliveMembers.map(m => m.user_id),
+          alivePlayerIds: aliveMembers.map((m) => m.user_id),
           killLog: [],
           meetingCount: 0,
         };
-        await redisClient.set(`game:${sessionId}`, JSON.stringify(gameState));
-        await redisClient.set(`game:${sessionId}:status`, 'playing');
+        await saveGameState(sessionId, gameState);
+        await redisClient.set(`game:${sessionId}:status`, 'in_progress');
 
         // 각 플레이어에게 역할 개별 전송
         for (const member of aliveMembers) {
@@ -480,18 +499,18 @@ export const createSocketServer = (httpServer) => {
       try {
         const gameRaw = await redisClient.get(`game:${sessionId}`);
         if (!gameRaw) return;
-        const gameState = JSON.parse(gameRaw);
+        const gameState = normalizeGameState(JSON.parse(gameRaw));
 
         if (!gameState.impostors.includes(userId)) return;
-        if (!gameState.aliveMembers.includes(targetUserId)) return;
+        if (!gameState.alivePlayerIds.includes(targetUserId)) return;
         if (!KillCooldownManager.canKill(sessionId, userId)) {
           return socket.emit(EVENTS.ERROR, { code: 'KILL_COOLDOWN' });
         }
 
         // 킬 처리
-        gameState.aliveMembers = gameState.aliveMembers.filter(id => id !== targetUserId);
+        gameState.alivePlayerIds = gameState.alivePlayerIds.filter((id) => id !== targetUserId);
         gameState.killLog.push({ killerId: userId, victimId: targetUserId, at: Date.now() });
-        await redisClient.set(`game:${sessionId}`, JSON.stringify(gameState));
+        await saveGameState(sessionId, gameState);
 
         KillCooldownManager.setKillCooldown(sessionId, userId, 30);
 
@@ -501,8 +520,8 @@ export const createSocketServer = (httpServer) => {
         socket.emit(EVENTS.GAME_KILL_CONFIRMED, { ok: true });
 
         // 승리 조건 체크
-        const aliveImpostors = gameState.impostors.filter(id => gameState.aliveMembers.includes(id));
-        const aliveCrew = gameState.aliveMembers.filter(id => !gameState.impostors.includes(id));
+        const aliveImpostors = gameState.impostors.filter((id) => gameState.alivePlayerIds.includes(id));
+        const aliveCrew = gameState.alivePlayerIds.filter((id) => !gameState.impostors.includes(id));
         if (aliveImpostors.length === 0) {
           io.to(`session:${sessionId}`).emit(EVENTS.GAME_OVER, { winner: 'crew', reason: 'impostors_ejected' });
         } else if (aliveImpostors.length >= aliveCrew.length) {
@@ -520,11 +539,11 @@ export const createSocketServer = (httpServer) => {
       try {
         const gameRaw = await redisClient.get(`game:${sessionId}`);
         if (!gameRaw) return;
-        const gameState = JSON.parse(gameRaw);
-        if (!gameState.aliveMembers.includes(userId)) return;
+        const gameState = normalizeGameState(JSON.parse(gameRaw));
+        if (!gameState.alivePlayerIds.includes(userId)) return;
 
         const session = await sessionService.getSession(sessionId);
-        session.aliveMembers = gameState.aliveMembers.map(id => ({ userId: id }));
+        session.aliveMembers = gameState.alivePlayerIds.map((id) => ({ userId: id }));
 
         VoteSystem.startMeeting(session, {
           callerId: userId,
@@ -543,12 +562,12 @@ export const createSocketServer = (httpServer) => {
       try {
         const gameRaw = await redisClient.get(`game:${sessionId}`);
         if (!gameRaw) return;
-        const gameState = JSON.parse(gameRaw);
-        if (!gameState.aliveMembers.includes(userId)) return;
-        if (gameState.aliveMembers.includes(bodyId)) return; // 살아있으면 신고 불가
+        const gameState = normalizeGameState(JSON.parse(gameRaw));
+        if (!gameState.alivePlayerIds.includes(userId)) return;
+        if (gameState.alivePlayerIds.includes(bodyId)) return; // 살아있으면 신고 불가
 
         const session = await sessionService.getSession(sessionId);
-        session.aliveMembers = gameState.aliveMembers.map(id => ({ userId: id }));
+        session.aliveMembers = gameState.alivePlayerIds.map((id) => ({ userId: id }));
 
         VoteSystem.startMeeting(session, {
           callerId: userId,
@@ -613,7 +632,7 @@ export const createSocketServer = (httpServer) => {
         const gameRaw = await redisClient.get(`game:${sessionId}`);
         if (!gameRaw) return respond({ ok: false, error: '게임이 시작되지 않았습니다.' });
 
-        const gameState  = JSON.parse(gameRaw);
+        const gameState  = normalizeGameState(JSON.parse(gameRaw));
         const isImpostor = gameState.impostors.includes(userId);
 
         // AIDirector.ask()에 넘길 room/player 형태로 래핑
@@ -623,7 +642,7 @@ export const createSocketServer = (httpServer) => {
           status:    gameState.status,
           killLog:   gameState.killLog || [],
           players:   new Map(
-            gameState.aliveMembers.map(id => [id, {
+            gameState.alivePlayerIds.map((id) => [id, {
               userId: id,
               isAlive: true,
               team: gameState.impostors.includes(id) ? 'impostor' : 'crew',
@@ -636,7 +655,7 @@ export const createSocketServer = (httpServer) => {
           nickname:  socket.user.nickname,
           team:      isImpostor ? 'impostor' : 'crew',
           roleId:    isImpostor ? 'impostor' : 'crew',
-          isAlive:   gameState.aliveMembers.includes(userId),
+          isAlive:   gameState.alivePlayerIds.includes(userId),
           tasks:     [],
         };
 
@@ -672,7 +691,7 @@ export const createSocketServer = (httpServer) => {
         }
 
         const [gameState, taggerId] = await Promise.all([
-          Promise.resolve(JSON.parse(gameRaw)),
+          Promise.resolve(normalizeGameState(JSON.parse(gameRaw))),
           redisClient.get(`tag:${sessionId}:tagger`),
         ]);
 
@@ -795,7 +814,7 @@ export const createSocketServer = (httpServer) => {
         const gameRaw = await redisClient.get(`game:${sessionId}`);
         if (!gameRaw) return;
 
-        const gameState = JSON.parse(gameRaw);
+        const gameState = normalizeGameState(JSON.parse(gameRaw));
         if (votedCount < gameState.alivePlayerIds.length) return;
 
         // 득표 집계
@@ -816,11 +835,25 @@ export const createSocketServer = (httpServer) => {
           { EX: 86400 }
         );
 
+        gameState.alivePlayerIds = gameState.alivePlayerIds.filter((id) => id !== eliminatedUserId);
+        if (gameState.alivePlayerIds.length <= 1) {
+          gameState.status = 'finished';
+          gameState.finishedAt = Date.now();
+        }
+        await saveGameState(sessionId, gameState);
+
         io.to(`session:${sessionId}`).emit(EVENTS.VOTE_RESULT, {
           sessionId,
           roundNumber,
           eliminatedUserId,
           voteBreakdown: tally,
+        });
+
+        io.to(`session:${sessionId}`).emit(EVENTS.GAME_STATE_UPDATE, {
+          sessionId,
+          status: gameState.status,
+          aliveCount: gameState.alivePlayerIds.length,
+          alivePlayerIds: gameState.alivePlayerIds,
         });
 
       } catch (err) {

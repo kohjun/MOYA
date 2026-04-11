@@ -122,6 +122,7 @@ class SocketService {
   final _playerEliminatedController = StreamController<Map<String, dynamic>>.broadcast();
   final _gameStateController        = StreamController<Map<String, dynamic>>.broadcast();
   final _gameOverController         = StreamController<Map<String, dynamic>>.broadcast();
+  final Map<String, StreamController<Map<String, dynamic>>> _gameEventControllers = {};
 
   Stream<LocationPayload>      get onLocationChanged => _locationController.stream;
   Stream<Map<String, dynamic>> get onMemberJoined    => _memberJoinController.stream;
@@ -145,6 +146,20 @@ class SocketService {
   static final SocketService _instance = SocketService._internal();
   factory SocketService() => _instance;
   SocketService._internal();
+
+  StreamController<Map<String, dynamic>> _controllerForGameEvent(String event) {
+    return _gameEventControllers.putIfAbsent(
+      event,
+      () => StreamController<Map<String, dynamic>>.broadcast(),
+    );
+  }
+
+  void _emitGameEvent(String event, dynamic data) {
+    if (data is! Map) return;
+    final controller = _gameEventControllers[event];
+    if (controller == null || controller.isClosed) return;
+    controller.add(Map<String, dynamic>.from(data));
+  }
 
   // ─────────────────────────────────────────────────────────────────────────
   // WebSocket 연결 (Access Token 전달)
@@ -251,7 +266,21 @@ class SocketService {
 
       // 게임 종료
       ..on(SocketEvents.gameOver, (data) =>
-          _gameOverController.add(Map<String, dynamic>.from(data as Map? ?? {})));
+          _gameOverController.add(Map<String, dynamic>.from(data as Map? ?? {})))
+      ..on(gameStarted, (data) => _emitGameEvent(gameStarted, data))
+      ..on(gameRoleAssigned, (data) => _emitGameEvent(gameRoleAssigned, data))
+      ..on(gameKillConfirmed, (data) => _emitGameEvent(gameKillConfirmed, data))
+      ..on(gameBodyFound, (data) => _emitGameEvent(gameBodyFound, data))
+      ..on(gameMeetingStarted, (data) => _emitGameEvent(gameMeetingStarted, data))
+      ..on(gameMeetingTick, (data) => _emitGameEvent(gameMeetingTick, data))
+      ..on(gameVotingStarted, (data) => _emitGameEvent(gameVotingStarted, data))
+      ..on(gameVoteSubmitted, (data) => _emitGameEvent(gameVoteSubmitted, data))
+      ..on(gamePreVoteSubmitted, (data) => _emitGameEvent(gamePreVoteSubmitted, data))
+      ..on(gameVoteResult, (data) => _emitGameEvent(gameVoteResult, data))
+      ..on(gameMeetingEnded, (data) => _emitGameEvent(gameMeetingEnded, data))
+      ..on(gameAiMessage, (data) => _emitGameEvent(gameAiMessage, data))
+      ..on(gameAiReply, (data) => _emitGameEvent(gameAiReply, data))
+      ..on(gameMissionProgress, (data) => _emitGameEvent(gameMissionProgress, data));
   }
 
   // ... (아래 joinSession, sendLocation 등 나머지 코드는 기존과 완벽히 동일하므로 생략하지 않고 그대로 유지하세요) ...
@@ -439,6 +468,10 @@ class SocketService {
     _playerEliminatedController.close();
     _gameStateController.close();
     _gameOverController.close();
+    for (final controller in _gameEventControllers.values) {
+      controller.close();
+    }
+    _gameEventControllers.clear();
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -501,12 +534,6 @@ class SocketService {
   }
 
   Stream<Map<String, dynamic>> onGameEvent(String event) {
-    final controller = StreamController<Map<String, dynamic>>.broadcast();
-    _socket?.on(event, (data) {
-      if (data is Map) {
-        controller.add(Map<String, dynamic>.from(data));
-      }
-    });
-    return controller.stream;
+    return _controllerForGameEvent(event).stream;
   }
 }

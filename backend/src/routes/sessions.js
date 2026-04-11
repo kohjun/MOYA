@@ -81,6 +81,7 @@ export default async function sessionRoutes(fastify) {
         SESSION_NOT_FOUND: 404,
         SESSION_ENDED:     410,
         SESSION_EXPIRED:   410,
+        SESSION_FULL:      409,
         ALREADY_IN_SESSION: 409,
       };
       return reply.code(errorMap[err.message] || 500).send({ error: err.message });

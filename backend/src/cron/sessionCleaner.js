@@ -55,14 +55,15 @@ cron.schedule('* * * * *', async () => {
         // 4. Socket.io로 클라이언트에 만료 알림 발송 및 소켓 강제 퇴장
         if (io) {
           // 방에 있는 모든 사람에게 만료 이벤트 쏘기
-          io.to(sessionId).emit('sessionExpired', {
+          io.to(`session:${sessionId}`).emit('sessionExpired', {
+            sessionId,
             message: '설정된 세션 시간이 만료되어 방이 자동으로 종료되었습니다.'
           });
 
           // 서버 단에서 해당 룸(Room)에 속한 소켓들을 강제로 방에서 내보내기
-          const sockets = await io.in(sessionId).fetchSockets();
+          const sockets = await io.in(`session:${sessionId}`).fetchSockets();
           for (const socket of sockets) {
-            socket.leave(sessionId);
+            socket.leave(`session:${sessionId}`);
           }
         }
         
