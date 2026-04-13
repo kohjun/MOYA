@@ -88,6 +88,14 @@ class SocketEvents {
   static const gameRequestState = 'game:request_state';
   static const gameStateUpdate = 'game:state_update';
   static const gameOver = 'game:over';
+  static const mediaGetRouterRtpCapabilities = 'getRouterRtpCapabilities';
+  static const mediaGetProducers = 'getProducers';
+  static const mediaCreateWebRtcTransport = 'createWebRtcTransport';
+  static const mediaConnectWebRtcTransport = 'connectWebRtcTransport';
+  static const mediaProduce = 'produce';
+  static const mediaConsume = 'consume';
+  static const mediaNewProducer = 'media:newProducer';
+  static const mediaProducerClosed = 'media:producerClosed';
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -134,6 +142,10 @@ class SocketService {
       StreamController<Map<String, dynamic>>.broadcast();
   final _gameStartedController =
       StreamController<Map<String, dynamic>>.broadcast();
+  final _mediaNewProducerController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  final _mediaProducerClosedController =
+      StreamController<Map<String, dynamic>>.broadcast();
   final Map<String, StreamController<Map<String, dynamic>>>
       _gameEventControllers = {};
 
@@ -161,8 +173,13 @@ class SocketService {
   Stream<Map<String, dynamic>> get onGameOver => _gameOverController.stream;
   Stream<Map<String, dynamic>> get onGameStarted =>
       _gameStartedController.stream;
+  Stream<Map<String, dynamic>> get onMediaNewProducer =>
+      _mediaNewProducerController.stream;
+  Stream<Map<String, dynamic>> get onMediaProducerClosed =>
+      _mediaProducerClosedController.stream;
 
   bool get isConnected => _isConnected;
+  String? get currentSessionId => _currentSessionId;
 
   static final SocketService _instance = SocketService._internal();
   factory SocketService() => _instance;
@@ -302,6 +319,14 @@ class SocketService {
       ..on(
           SocketEvents.gameOver,
           (data) => _gameOverController
+              .add(Map<String, dynamic>.from(data as Map? ?? {})))
+      ..on(
+          SocketEvents.mediaNewProducer,
+          (data) => _mediaNewProducerController
+              .add(Map<String, dynamic>.from(data as Map? ?? {})))
+      ..on(
+          SocketEvents.mediaProducerClosed,
+          (data) => _mediaProducerClosedController
               .add(Map<String, dynamic>.from(data as Map? ?? {})))
       ..on(gameStarted, (data) {
         _emitGameEvent(gameStarted, data);
@@ -454,6 +479,48 @@ class SocketService {
     _socket?.emit(event, data);
   }
 
+  Future<Map<String, dynamic>> emitWithAck(
+    String event, [
+    Map<String, dynamic>? data,
+    Duration timeout = const Duration(seconds: 10),
+  ]) {
+    final socket = _socket;
+    if (!_isConnected || socket == null) {
+      return Future.error(Exception('SOCKET_DISCONNECTED'));
+    }
+
+    final completer = Completer<Map<String, dynamic>>();
+    Timer? timer;
+
+    timer = Timer(timeout, () {
+      if (!completer.isCompleted) {
+        completer.completeError(
+          TimeoutException('Ack timeout for $event', timeout),
+        );
+      }
+    });
+
+    socket.emitWithAck(
+      event,
+      data ?? const <String, dynamic>{},
+      ack: (response) {
+        timer?.cancel();
+        if (completer.isCompleted) {
+          return;
+        }
+
+        if (response is Map) {
+          completer.complete(Map<String, dynamic>.from(response));
+          return;
+        }
+
+        completer.complete(<String, dynamic>{'ok': false, 'data': response});
+      },
+    );
+
+    return completer.future;
+  }
+
   void interactAction({
     required String sessionId,
     required String actionType,
@@ -533,6 +600,8 @@ class SocketService {
     _gameStateController.close();
     _gameOverController.close();
     _gameStartedController.close();
+    _mediaNewProducerController.close();
+    _mediaProducerClosedController.close();
     for (final controller in _gameEventControllers.values) {
       controller.close();
     }

@@ -2,6 +2,7 @@ import { redisClient } from '../config/redis.js';
 import * as sessionService from '../services/sessionService.js';
 import * as MissionSystem from './MissionSystem.js';
 import * as AIDirector from '../ai/AIDirector.js';
+import { getMediaServer } from '../media/MediaServer.js';
 
 const GAME_TTL_SECONDS = 86400;
 
@@ -87,6 +88,12 @@ export const startGameForSession = async ({
       ? session.active_modules
       : [],
   };
+
+  const mediaRoom = getMediaServer()?.getRoom(sessionId);
+  if (mediaRoom) {
+    mediaRoom.setAlivePeers(aliveMembers.map((member) => member.user_id));
+    mediaRoom.muteAll();
+  }
 
   io.to(`session:${sessionId}`).emit(GAME_EVENTS.started, startedPayload);
 

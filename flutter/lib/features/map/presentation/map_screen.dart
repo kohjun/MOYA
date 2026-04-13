@@ -10,6 +10,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/router/app_router.dart';
+import '../../../core/services/mediasoup_audio_service.dart';
 import '../../../core/services/socket_service.dart';
 import '../../../core/services/location_service.dart';
 import '../../../features/auth/data/auth_repository.dart';
@@ -35,6 +36,7 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
   final Ref _ref;
 
   final _socket = SocketService();
+  final _audio = MediaSoupAudioService();
   final _gps = GpsLocationService();
 
   StreamSubscription? _locationSub;
@@ -98,6 +100,7 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
         state = state.copyWith(isConnected: true, hasEverConnected: true);
         _socket.joinSession(_sessionId);
         _socket.requestGameState(_sessionId);
+        unawaited(_audio.ensureJoined(_sessionId));
       }
     } catch (e) {
       debugPrint('[Map] Socket connect failed: $e');
@@ -189,6 +192,7 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
       );
       if (connected) {
         _socket.joinSession(_sessionId);
+        unawaited(_audio.ensureJoined(_sessionId));
       }
     });
 
@@ -560,6 +564,7 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
     _gameOverSub?.cancel();
     _gps.setSessionId(null);
     _gps.stopTracking();
+    unawaited(_audio.leaveSession());
     _socket.disconnect();
     // 방에서 나가거나 강퇴당하면 백그라운드 서비스를 종료합니다.
     SharedPreferences.getInstance().then((p) => p.setBool('bg_active', false));

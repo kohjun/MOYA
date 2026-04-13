@@ -4,6 +4,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/services/mediasoup_audio_service.dart';
 import '../../../core/services/socket_service.dart';
 import '../../home/data/session_repository.dart';
 
@@ -56,6 +57,7 @@ class LobbyNotifier extends StateNotifier<LobbyState> {
   final Ref _ref;
 
   final _socket = SocketService();
+  final _audio = MediaSoupAudioService();
 
   StreamSubscription? _memberJoinSub;
   StreamSubscription? _memberLeftSub;
@@ -68,6 +70,7 @@ class LobbyNotifier extends StateNotifier<LobbyState> {
     try {
       await _socket.connect();
       _socket.joinSession(_sessionId);
+      unawaited(_audio.ensureJoined(_sessionId));
     } catch (e) {
       debugPrint('[Lobby] Socket connect failed: $e');
     }
@@ -125,6 +128,7 @@ class LobbyNotifier extends StateNotifier<LobbyState> {
     _connectionSub = _socket.onConnectionChange.listen((connected) {
       if (connected) {
         _socket.joinSession(_sessionId);
+        unawaited(_audio.ensureJoined(_sessionId));
       }
     });
   }

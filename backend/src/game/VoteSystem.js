@@ -335,6 +335,10 @@ class VoteSystem {
     voteSession.end();
     this.sessions.delete(sessionId);
   }
+
+  hasActiveMeeting(sessionId) {
+    return this.sessions.has(sessionId);
+  }
 }
 
 export default new VoteSystem();

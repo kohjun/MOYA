@@ -13,6 +13,8 @@ import KillCooldownManager from '../game/KillCooldownManager.js';
 import EventBus from '../game/EventBus.js';
 import * as AIDirector from '../ai/AIDirector.js';
 import { startGameForSession } from '../game/startGameService.js';
+import { getMediaServer } from '../media/MediaServer.js';
+import { registerMediaSignalingHandlers } from './mediaSignaling.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Socket.IO 이벤트 상수 (클라이언트와 공유하는 프로토콜)
@@ -27,6 +29,12 @@ export const EVENTS = {
   ACTION_INTERACT:     'action:interact',
   GAME_START:          'game:start',
   GAME_REQUEST_STATE:  'game:request_state',
+  MEDIA_GET_ROUTER_RTP_CAPABILITIES: 'getRouterRtpCapabilities',
+  MEDIA_GET_PRODUCERS:                 'getProducers',
+  MEDIA_CREATE_WEBRTC_TRANSPORT:     'createWebRtcTransport',
+  MEDIA_CONNECT_WEBRTC_TRANSPORT:    'connectWebRtcTransport',
+  MEDIA_PRODUCE:                     'produce',
+  MEDIA_CONSUME:                     'consume',
 
   // Server → Client
   SESSION_JOINED:     'session:joined',
@@ -51,6 +59,8 @@ export const EVENTS = {
   VOTE_OPEN:          'vote:open',
   VOTE_CAST:          'vote:cast',
   VOTE_RESULT:        'vote:result',
+  MEDIA_NEW_PRODUCER:   'media:newProducer',
+  MEDIA_PRODUCER_CLOSED:'media:producerClosed',
   ERROR:              'error',
 
   // Amongus Client → Server
@@ -130,10 +140,55 @@ const saveGameState = async (sessionId, rawGameState, ttlSeconds = 86400) => {
 let _io = null;
 export const getIo = () => _io;
 
+const syncMediaRoomState = async (sessionId, room) => {
+  if (!room) {
+    return null;
+  }
+
+  const gameRaw = await redisClient.get(`game:${sessionId}`);
+  if (!gameRaw) {
+    room.setAlivePeers([...room.peers.keys()]);
+    room.openLobbyVoice();
+    return null;
+  }
+
+  const gameState = normalizeGameState(JSON.parse(gameRaw));
+  room.setAlivePeers(gameState.alivePlayerIds);
+
+  if (VoteSystem.hasActiveMeeting(sessionId)) {
+    room.startEmergencyMeeting();
+  } else if (gameState.status === 'in_progress') {
+    room.muteAll();
+  } else {
+    room.openLobbyVoice();
+  }
+
+  return gameState;
+};
+
+const ensureMediaRoomForSocket = async ({ socket, mediaServer, sessionId }) => {
+  if (!mediaServer) {
+    return null;
+  }
+
+  const room = await mediaServer.getOrCreateRoom(sessionId);
+  room.addPeer({
+    userId: socket.user.id,
+    socket,
+    isAlive: true,
+  });
+
+  await syncMediaRoomState(sessionId, room);
+  return room;
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Socket.IO 서버 초기화
 // ─────────────────────────────────────────────────────────────────────────────
-export const createSocketServer = (httpServer) => {
+export const createSocketServer = (
+  httpServer,
+  { mediaServer = getMediaServer() } = {},
+) => {
   _io = new Server(httpServer, {
     cors: {
       origin: process.env.ALLOWED_ORIGINS?.split(',') || '*',
@@ -170,6 +225,28 @@ export const createSocketServer = (httpServer) => {
 
     socket.join(`user:${userId}`);
 
+    const leaveSession = async (sessionIdToLeave = socket.currentSessionId) => {
+      if (!sessionIdToLeave) {
+        return;
+      }
+
+      socket.leave(`session:${sessionIdToLeave}`);
+      mediaServer?.removePeer(sessionIdToLeave, userId);
+
+      if (socket.currentSessionId === sessionIdToLeave) {
+        socket.currentSessionId = null;
+      }
+    };
+
+    if (mediaServer) {
+      registerMediaSignalingHandlers({
+        socket,
+        mediaServer,
+        events: EVENTS,
+        syncRoomState: syncMediaRoomState,
+      });
+    }
+
     // ── session:join ──────────────────────────────────────────────────
     socket.on(EVENTS.JOIN_SESSION, async ({ sessionId }) => {
       if (!sessionId) {
@@ -181,6 +258,10 @@ export const createSocketServer = (httpServer) => {
         const isMember = members.some((m) => m.user_id === userId);
         if (!isMember) {
           return socket.emit(EVENTS.ERROR, { code: 'NOT_A_MEMBER' });
+        }
+
+        if (socket.currentSessionId && socket.currentSessionId !== sessionId) {
+          await leaveSession(socket.currentSessionId);
         }
 
         const roomName = `session:${sessionId}`;
@@ -204,6 +285,12 @@ export const createSocketServer = (httpServer) => {
 
         socket.emit(EVENTS.SESSION_JOINED, { sessionId, memberCount: members.length });
 
+        await ensureMediaRoomForSocket({
+          socket,
+          mediaServer,
+          sessionId,
+        });
+
       } catch (err) {
         console.error('[WS] join error:', err);
         socket.emit(EVENTS.ERROR, { code: 'JOIN_FAILED' });
@@ -211,6 +298,20 @@ export const createSocketServer = (httpServer) => {
     });
 
     // ── location:update ───────────────────────────────────────────────
+    socket.on(EVENTS.LEAVE_SESSION, async ({ sessionId: sid } = {}) => {
+      const sessionId = sid || socket.currentSessionId;
+      if (!sessionId) return;
+
+      await leaveSession(sessionId);
+
+      socket.to(`session:${sessionId}`).emit(EVENTS.MEMBER_LEFT, {
+        userId,
+        nickname: socket.user.nickname,
+        reason: 'leave',
+        timestamp: Date.now(),
+      });
+    });
+
     socket.on(EVENTS.LOCATION_UPDATE, async (payload) => {
       const sessionId = socket.currentSessionId || payload.sessionId;
       if (!sessionId) return;
@@ -390,6 +491,8 @@ export const createSocketServer = (httpServer) => {
                 (id) => id !== targetUserId
               );
 
+              mediaServer?.getRoom(sessionId)?.setAlivePeers(gameState.alivePlayerIds);
+
               if (gameState.alivePlayerIds.length === 1) {
                 gameState.status = 'finished';
                 gameState.finishedAt = Date.now();
@@ -456,6 +559,7 @@ export const createSocketServer = (httpServer) => {
 
         gameState.alivePlayerIds = gameState.alivePlayerIds.filter((id) => id !== targetUserId);
         gameState.killLog.push({ killerId: userId, victimId: targetUserId, at: Date.now() });
+        mediaServer?.getRoom(sessionId)?.setAlivePeers(gameState.alivePlayerIds);
         await saveGameState(sessionId, gameState);
 
         KillCooldownManager.setKillCooldown(sessionId, userId, 30);
@@ -857,13 +961,14 @@ export const createSocketServer = (httpServer) => {
       }).catch((err) => console.error('[WS] FCM SOS error:', err));
     });
 
-    socket.on('disconnect', (reason) => {
+    socket.on('disconnect', async (reason) => {
       console.log(`[WS] Disconnected: ${socket.user.nickname} - ${reason}`);
       const sessionId = socket.currentSessionId;
       if (sessionId) {
         socket.to(`session:${sessionId}`).emit(EVENTS.MEMBER_LEFT, {
           userId, nickname: socket.user.nickname, reason, timestamp: Date.now(),
         });
+        await leaveSession(sessionId);
       }
     });
   });
@@ -876,6 +981,15 @@ export const createSocketServer = (httpServer) => {
       reason:         voteSession.reason,
       discussionTime: voteSession.discussionTime,
     });
+
+    const mediaRoom = mediaServer?.getRoom(session.id);
+    if (mediaRoom) {
+      mediaRoom.setAlivePeers(
+        (session.aliveMembers ?? []).map((member) => member.user_id ?? member.userId),
+      );
+      mediaRoom.startEmergencyMeeting();
+    }
+
     try {
       const caller = { nickname: voteSession.callerId };
       const body   = voteSession.bodyId ? { nickname: voteSession.bodyId, zone: '' } : null;
@@ -931,6 +1045,8 @@ export const createSocketServer = (httpServer) => {
           }
 
           await saveGameState(session.id, gameState);
+          mediaServer?.getRoom(session.id)?.setAlivePeers(gameState.alivePlayerIds);
+          mediaServer?.getRoom(session.id)?.startEmergencyMeeting();
           io.to(`session:${session.id}`).emit(EVENTS.GAME_STATE_UPDATE, {
             sessionId: session.id, status: gameState.status,
             aliveCount: gameState.alivePlayerIds.length, alivePlayerIds: gameState.alivePlayerIds,
@@ -953,6 +1069,7 @@ export const createSocketServer = (httpServer) => {
   });
 
   EventBus.on('meeting_ended', ({ session }) => {
+    mediaServer?.getRoom(session.id)?.muteAll();
     io.to(`session:${session.id}`).emit(EVENTS.GAME_MEETING_ENDED, { message: '게임으로 돌아갑니다.' });
   });
 

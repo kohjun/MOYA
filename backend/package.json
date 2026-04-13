@@ -2,11 +2,11 @@
   "name": "location-sharing-backend",
   "version": "1.0.0",
   "description": "Real-time location sharing backend",
-  "main": "src/index.js",
+  "main": "src/server.js",
   "type": "module",
   "scripts": {
-    "dev": "nodemon --experimental-vm-modules src/index.js",
-    "start": "node src/index.js",
+    "dev": "nodemon --experimental-vm-modules src/server.js",
+    "start": "node src/server.js",
     "migrate": "node src/config/migrate.js"
   },
   "dependencies": {
@@ -23,6 +23,7 @@
     "fastify": "^5.8.4",
     "firebase-admin": "^10.3.0",
     "jsonwebtoken": "^9.0.3",
+    "mediasoup": "^3.19.19",
     "node-cron": "^4.2.1",
     "pg": "^8.11.3",
     "redis": "^4.7.1",
