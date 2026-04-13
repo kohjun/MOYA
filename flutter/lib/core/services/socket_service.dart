@@ -604,10 +604,19 @@ class SocketService {
 
   void sendAiQuestion(
       String sessionId, String question, Function(Map) callback) {
+    if (!_isConnected || _socket == null) {
+      callback({'ok': false, 'error': 'SOCKET_DISCONNECTED'});
+      return;
+    }
+
     _socket?.emitWithAck(
       'game:ai_ask',
       {'sessionId': sessionId, 'question': question},
-      ack: (data) => callback(data as Map),
+      ack: (data) => callback(
+        data is Map
+            ? Map<String, dynamic>.from(data)
+            : {'ok': false, 'error': 'INVALID_AI_ACK'},
+      ),
     );
   }
 

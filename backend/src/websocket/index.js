@@ -465,6 +465,46 @@ export const createSocketServer = (httpServer) => {
         });
         socket.emit(EVENTS.GAME_KILL_CONFIRMED, { ok: true });
 
+        try {
+          const members = await sessionService.getSessionMembers(sessionId);
+          const memberById = new Map(
+            members.map((member) => [member.user_id, member]),
+          );
+          const killer = memberById.get(userId) ?? {
+            user_id: userId,
+            nickname: socket.user.nickname ?? userId,
+          };
+          const target = memberById.get(targetUserId) ?? {
+            user_id: targetUserId,
+            nickname: targetUserId,
+          };
+          const msg = await AIDirector.onKill(
+            {
+              roomId: sessionId,
+              killLog: gameState.killLog,
+              alivePlayerIds: gameState.alivePlayerIds,
+              impostors: gameState.impostors,
+            },
+            {
+              userId,
+              nickname: killer.nickname ?? userId,
+            },
+            {
+              userId: targetUserId,
+              nickname: target.nickname ?? targetUserId,
+              zone: target.zone ?? '',
+            },
+          );
+          if (msg) {
+            io.to(`session:${sessionId}`).emit(EVENTS.GAME_AI_MESSAGE, {
+              type: 'kill',
+              message: msg,
+            });
+          }
+        } catch (aiError) {
+          console.error('[AI] kill announcement failed:', aiError.message);
+        }
+
         const aliveImpostors = gameState.impostors.filter((id) => gameState.alivePlayerIds.includes(id));
         const aliveCrew = gameState.alivePlayerIds.filter((id) => !gameState.impostors.includes(id));
         

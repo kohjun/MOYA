@@ -5,15 +5,15 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 const MODELS = {
-  fast:    'gemini-2.0-flash-lite',
+  fast: 'gemini-2.5-flash',
   precise: 'gemini-2.5-flash',
 };
 
-const MAX_RETRIES  = 3;
-const RETRY_DELAYS = [1000, 2000, 4000]; // 지수 백오프 (ms)
+const MAX_RETRIES = 3;
+const RETRY_DELAYS = [1000, 2000, 4000];
 
 function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function is503(err) {
@@ -26,23 +26,25 @@ function is503(err) {
 
 async function callModel(modelName, { prompt, systemPrompt, maxTokens }) {
   const genModel = genAI.getGenerativeModel({
-    model:             modelName,
+    model: modelName,
     systemInstruction: systemPrompt,
   });
+
   const result = await genModel.generateContent({
-    contents:         [{ role: 'user', parts: [{ text: prompt }] }],
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
     generationConfig: { maxOutputTokens: maxTokens, temperature: 0.8 },
   });
+
   return result.response.text().trim();
 }
 
 async function chat({ prompt, systemPrompt, model = 'fast', maxTokens = 500 }) {
-  const modelName = MODELS[model];
+  const modelName = MODELS[model] ?? MODELS.fast;
 
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
     if (attempt > 0) {
       const delay = RETRY_DELAYS[attempt - 1];
-      console.warn(`[LLM] 503 재시도 (${attempt}/${MAX_RETRIES}) — ${delay}ms 대기...`);
+      console.warn(`[LLM] 503 retry (${attempt}/${MAX_RETRIES}) after ${delay}ms`);
       await sleep(delay);
     }
 
@@ -52,20 +54,23 @@ async function chat({ prompt, systemPrompt, model = 'fast', maxTokens = 500 }) {
       const shouldRetry = is503(err) && attempt < MAX_RETRIES;
       if (shouldRetry) continue;
 
-      // 재시도 소진 또는 503 아닌 오류
       if (model === 'precise') {
-        // precise 최종 실패 → gemini-2.0-flash-lite 폴백
-        console.warn(`[LLM] ${modelName} 실패 (${err.message}), gemini-2.0-flash-lite 폴백`);
+        console.warn(
+          `[LLM] ${modelName} failed (${err.message}), retrying once with ${MODELS.fast}`,
+        );
         try {
-          return await callModel(MODELS.fast, { prompt, systemPrompt, maxTokens });
+          return await callModel(MODELS.fast, {
+            prompt,
+            systemPrompt,
+            maxTokens,
+          });
         } catch (fallbackErr) {
-          console.error('[LLM] 폴백도 실패:', fallbackErr.message);
+          console.error('[LLM] fallback failed:', fallbackErr.message);
           return getFallbackMessage(prompt);
         }
       }
 
-      // fast 실패 → 정적 메시지 반환
-      console.error('[LLM] API 오류:', err.message);
+      console.error('[LLM] API error:', err.message);
       return getFallbackMessage(prompt);
     }
   }
@@ -73,13 +78,12 @@ async function chat({ prompt, systemPrompt, model = 'fast', maxTokens = 500 }) {
   return getFallbackMessage(prompt);
 }
 
-// API 장애 시 fallback
 function getFallbackMessage(prompt) {
-  if (prompt.includes('킬'))   return '🔴 이상한 낌새가 느껴집니다...';
-  if (prompt.includes('회의')) return '🚨 긴급 회의가 소집됩니다!';
-  if (prompt.includes('추방')) return '⚖️ 투표 결과가 나왔습니다.';
-  if (prompt.includes('미션')) return '📋 미션을 계속 진행하세요.';
-  return '👁️ 모든 것을 지켜보고 있습니다...';
+  if (prompt.includes('kill')) return 'A new sign of danger is in the air...';
+  if (prompt.includes('meeting')) return 'An emergency meeting has begun.';
+  if (prompt.includes('vote')) return 'The vote result is being finalized.';
+  if (prompt.includes('mission')) return 'Keep moving on your mission.';
+  return 'AI MOYA is watching the situation...';
 }
 
 export { chat };

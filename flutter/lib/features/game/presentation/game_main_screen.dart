@@ -17,7 +17,6 @@ import '../../map/presentation/map_screen.dart';
 import '../../map/presentation/map_session_models.dart';
 import '../data/game_models.dart';
 import '../providers/game_provider.dart';
-import 'game_meeting_screen.dart';
 import 'widgets/ai_chat_panel.dart'; 
 
 class GameMainScreen extends ConsumerStatefulWidget {
@@ -439,8 +438,8 @@ class _GameMainScreenState extends ConsumerState<GameMainScreen>
             // 유령 모드 오버레이
             if (isGhostMode)
               Positioned.fill(
-                child: AbsorbPointer(
-                  absorbing: true,
+                child: IgnorePointer(
+                  ignoring: true,
                   child: Container(
                     color: Colors.black.withValues(alpha: 0.28),
                     alignment: Alignment.center,
@@ -933,7 +932,7 @@ class _GameMapSheetState extends ConsumerState<_GameMapSheet> {
         // 서브캡션: 멤버 닉네임 나열
         final nicknames = clusterMembers.map((m) => m.nickname).join(', ');
 
-        final pinColor = Colors.purple;
+        const pinColor = Colors.purple;
         final caption = NOverlayCaption(
             text: captionText,
             textSize: 14,

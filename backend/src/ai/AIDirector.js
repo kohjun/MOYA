@@ -5,7 +5,8 @@ import { SYSTEM_PROMPT, PROMPTS } from './prompt.js';
 import { retrieve } from './rag/ragRetriever.js';
 import { GamePluginRegistry } from '../game/index.js';
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const PRIMARY_MODEL = 'gemini-2.5-flash';
+const RETRY_DELAYS_MS = [1000, 2000, 4000];
 
 const cooldowns = new Map();
 const conversationHistory = new Map();
@@ -34,6 +35,10 @@ function addHistory(roomId, userId, role, content) {
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function isGeminiCredentialError(error) {
   const message = `${error?.message ?? ''}`;
   return (
@@ -42,6 +47,78 @@ function isGeminiCredentialError(error) {
     message.includes('API_KEY_INVALID') ||
     message.includes('PERMISSION_DENIED')
   );
+}
+
+function isGeminiOverloadError(error) {
+  const message = `${error?.message ?? ''}`;
+  return (
+    error?.status === 503 ||
+    error?.statusCode === 503 ||
+    message.includes('503 Service Unavailable') ||
+    message.includes('currently experiencing high demand') ||
+    message.includes('UNAVAILABLE')
+  );
+}
+
+function createGenerativeModel(model, systemPrompt) {
+  return new GoogleGenerativeAI(process.env.GEMINI_API_KEY).getGenerativeModel({
+    model,
+    systemInstruction: systemPrompt,
+  });
+}
+
+async function askWithModel({ model, systemPrompt, history, question }) {
+  const chatSession = createGenerativeModel(model, systemPrompt).startChat({
+    history,
+    generationConfig: {
+      maxOutputTokens: 500,
+      temperature: 0.7,
+    },
+  });
+
+  const result = await chatSession.sendMessage(question);
+  return result.response.text().trim();
+}
+
+async function askWithRetry({ systemPrompt, history, question }) {
+  let lastError = null;
+  const attempts = RETRY_DELAYS_MS.length + 1;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    if (attempt > 1) {
+      const delay =
+        RETRY_DELAYS_MS[Math.min(attempt - 2, RETRY_DELAYS_MS.length - 1)];
+      console.warn(
+        `[AIDirector.ask] ${PRIMARY_MODEL} retry ${attempt - 1}/${attempts - 1} after ${delay}ms`,
+      );
+      await sleep(delay);
+    }
+
+    try {
+      return await askWithModel({
+        model: PRIMARY_MODEL,
+        systemPrompt,
+        history,
+        question,
+      });
+    } catch (error) {
+      lastError = error;
+
+      if (isGeminiCredentialError(error)) {
+        throw error;
+      }
+
+      const canRetryCurrentModel =
+        isGeminiOverloadError(error) && attempt < attempts;
+      if (canRetryCurrentModel) {
+        continue;
+      }
+
+      break;
+    }
+  }
+
+  throw lastError ?? new Error('Gemini request failed');
 }
 
 function buildAskFailure(error) {
@@ -55,8 +132,18 @@ function buildAskFailure(error) {
     };
   }
 
+  if (isGeminiOverloadError(error)) {
+    return {
+      answer:
+        'AI MOYA 요청이 잠시 몰려서 답변이 지연되고 있습니다. 잠시 후 다시 질문해 주세요.',
+      sources: [],
+      isError: true,
+      errorCode: 'AI_TEMPORARILY_BUSY',
+    };
+  }
+
   return {
-    answer: 'AI MOYA가 잠시 응답하지 못했습니다. 잠시 뒤 다시 질문해 주세요.',
+    answer: 'AI MOYA가 잠시 응답하지 못했습니다. 잠시 후 다시 질문해 주세요.',
     sources: [],
     isError: true,
     errorCode: 'AI_UNAVAILABLE',
@@ -85,26 +172,16 @@ async function ask(room, player, question) {
       `\n[현재 게임 상황]\n${plugin.buildStateContext(room, player)}`,
     ].join('\n');
 
-    const genModel = genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash',
-      systemInstruction: systemPrompt,
-    });
-
     const history = getHistory(room.roomId, player.userId).map((message) => ({
       role: message.role === 'assistant' ? 'model' : 'user',
       parts: [{ text: message.content }],
     }));
 
-    const chatSession = genModel.startChat({
+    const answer = await askWithRetry({
+      systemPrompt,
       history,
-      generationConfig: {
-        maxOutputTokens: 500,
-        temperature: 0.7,
-      },
+      question,
     });
-
-    const result = await chatSession.sendMessage(question);
-    const answer = result.response.text().trim();
 
     addHistory(room.roomId, player.userId, 'user', question);
     addHistory(room.roomId, player.userId, 'assistant', answer);
@@ -129,8 +206,15 @@ function cleanupRoom(roomId) {
 }
 
 async function onGameStart(room) {
+  const playerCount = room.players?.size ?? room.players?.length ?? 0;
+  const impostorCount =
+    room.impostors?.length ??
+    [...(room.players?.values?.() ?? [])].filter(
+      (player) => player.team === 'impostor',
+    ).length;
+
   return chat({
-    prompt: PROMPTS.gameStart(room.players.size),
+    prompt: PROMPTS.gameStart(playerCount, impostorCount),
     systemPrompt: SYSTEM_PROMPT,
     model: 'fast',
   });
@@ -139,12 +223,22 @@ async function onGameStart(room) {
 async function onKill(room, killer, target) {
   if (isOnCooldown(`${room.roomId}_kill`, 3000)) return null;
 
+  const alivePlayerIds = room.alivePlayerIds ?? [];
+  const impostors = room.impostors ?? [];
+  const remainingCrew =
+    room.aliveCrew?.length ??
+    alivePlayerIds.filter((id) => !impostors.includes(id)).length;
+  const remainingImpostors =
+    room.aliveImpostors?.length ??
+    alivePlayerIds.filter((id) => impostors.includes(id)).length;
+
   return chat({
     prompt: PROMPTS.kill(
       target.nickname,
       target.zone,
       room.killLog.length,
-      room.aliveCrew?.length ?? 0,
+      remainingCrew,
+      remainingImpostors,
     ),
     systemPrompt: SYSTEM_PROMPT,
     model: 'fast',
@@ -166,11 +260,11 @@ async function onMeeting(room, caller, reason, body = null) {
 }
 
 async function onVoteResult(room, result, ejected) {
-  const cooldownGuide = '다음 투표는 30초 뒤에 다시 열 수 있습니다.';
+  const cooldownGuide = '다음 투표는 30초 뒤에 다시 열립니다.';
 
   if (!ejected) {
     if (result.isTied) {
-      return `AI MOYA: 투표 결과 동점이 나와 아무도 추방되지 않았습니다. ${cooldownGuide}`;
+      return `AI MOYA: 투표 결과 동점으로 아무도 추방되지 않았습니다. ${cooldownGuide}`;
     }
     return `AI MOYA: 투표 결과 아무도 추방되지 않았습니다. ${cooldownGuide}`;
   }

@@ -1,12 +1,14 @@
 import { redisClient } from '../config/redis.js';
 import * as sessionService from '../services/sessionService.js';
 import * as MissionSystem from './MissionSystem.js';
+import * as AIDirector from '../ai/AIDirector.js';
 
 const GAME_TTL_SECONDS = 86400;
 
 const GAME_EVENTS = {
   started: 'game:started',
   roleAssigned: 'game:role_assigned',
+  aiMessage: 'game:ai_message',
 };
 
 const normalizeAliveMembers = (members) =>
@@ -87,6 +89,31 @@ export const startGameForSession = async ({
   };
 
   io.to(`session:${sessionId}`).emit(GAME_EVENTS.started, startedPayload);
+
+  try {
+    const roomLike = {
+      players: new Map(
+        aliveMembers.map((member) => [
+          member.user_id,
+          {
+            userId: member.user_id,
+            nickname: member.nickname ?? member.user_id,
+            team: impostors.has(member.user_id) ? 'impostor' : 'crew',
+          },
+        ]),
+      ),
+      impostors: [...impostors],
+    };
+    const msg = await AIDirector.onGameStart(roomLike);
+    if (msg) {
+      io.to(`session:${sessionId}`).emit(GAME_EVENTS.aiMessage, {
+        type: 'announcement',
+        message: msg,
+      });
+    }
+  } catch (error) {
+    console.error('[AI] game start announcement failed:', error.message);
+  }
 
   for (const member of aliveMembers) {
     const isImpostor = impostors.has(member.user_id);

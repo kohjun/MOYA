@@ -1,5 +1,8 @@
 // lib/main.dart
 
+import 'dart:async';
+import 'dart:ui';
+
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -16,8 +19,53 @@ Future<void> requestPermissions() async {
   await Permission.notification.request();
   await Permission.locationAlways.request(); // 백그라운드 알림을 위해 '항상 허용' 필요
 }
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+
+void _logUnhandledError(
+  String source,
+  Object error,
+  StackTrace stackTrace,
+) {
+  debugPrint('[$source] $error');
+  debugPrintStack(label: '[$source] stack', stackTrace: stackTrace);
+}
+
+Future<void> main() async {
+  await runZonedGuarded(() async {
+    WidgetsFlutterBinding.ensureInitialized();
+
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    _logUnhandledError(
+      'FlutterError',
+      details.exception,
+      details.stack ?? StackTrace.current,
+    );
+  };
+
+  PlatformDispatcher.instance.onError = (error, stackTrace) {
+    _logUnhandledError('PlatformDispatcher', error, stackTrace);
+    return false;
+  };
+
+  ErrorWidget.builder = (details) {
+    _logUnhandledError(
+      'ErrorWidget',
+      details.exception,
+      details.stack ?? StackTrace.current,
+    );
+    return Material(
+      color: Colors.red.shade50,
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Text(
+            'A rendering error occurred.\n${details.exception}',
+            style: const TextStyle(color: Colors.black87),
+          ),
+        ),
+      ),
+    );
+  };
 
 
   // Firebase 초기화 — 실패해도 앱은 계속 실행
@@ -65,9 +113,12 @@ void main() async {
     debugPrint('bg_active 초기화 실패: $e');
   }
 
-  runApp(
-    const ProviderScope(
-      child: LocationApp(),
-    ),
-  );
+    runApp(
+      const ProviderScope(
+        child: LocationApp(),
+      ),
+    );
+  }, (error, stackTrace) {
+    _logUnhandledError('runZonedGuarded', error, stackTrace);
+  });
 }
