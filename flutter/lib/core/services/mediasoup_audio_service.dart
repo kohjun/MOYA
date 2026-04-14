@@ -6,6 +6,11 @@ import 'package:permission_handler/permission_handler.dart';
 
 import 'socket_service.dart';
 
+// VAD 설정
+const _kVadIntervalMs = 200;      // stats 폴링 주기 (ms)
+const _kSpeakingThreshold = 0.01; // 이 레벨 이상이면 말하는 중으로 판단
+const _kSpeakingDebounceMs = 600; // speaking→silent 전환 대기시간 (ms)
+
 class MediaSoupAudioService {
   MediaSoupAudioService._internal() {
     _bindSocketStreams();
@@ -34,6 +39,21 @@ class MediaSoupAudioService {
   StreamSubscription<bool>? _connectionSub;
   StreamSubscription<Map<String, dynamic>>? _newProducerSub;
   StreamSubscription<Map<String, dynamic>>? _producerClosedSub;
+
+  // ── 음소거 상태 ──────────────────────────────────────────────────────────
+  bool _isMuted = false;
+  final _mutedController = StreamController<bool>.broadcast();
+
+  // ── VAD (Voice Activity Detection) ──────────────────────────────────────
+  bool _isSpeaking = false;
+  DateTime? _lastSpeakingAt;
+  Timer? _vadTimer;
+  final _speakingController = StreamController<bool>.broadcast();
+
+  bool get isMuted => _isMuted;
+  bool get isSpeaking => _isSpeaking;
+  Stream<bool> get isMutedStream => _mutedController.stream;
+  Stream<bool> get isSpeakingStream => _speakingController.stream;
 
   bool get isReady =>
       _device != null && _recvTransport != null && _currentSessionId != null;
@@ -270,11 +290,102 @@ class MediaSoupAudioService {
           opusDtx: 1,
         ),
       );
+      _startVad();
     } catch (error) {
       debugPrint('[MediaSoup] failed to publish mic: $error');
       if (stream != null) {
         await Future.sync(stream.dispose);
       }
+    }
+  }
+
+  // ── 음소거 토글 ──────────────────────────────────────────────────────────
+  Future<void> toggleMute() async {
+    final producer = _micProducer;
+    if (producer == null) return;
+
+    _isMuted = !_isMuted;
+
+    if (_isMuted) {
+      producer.pause();
+      // 음소거 시 speaking 상태 즉시 해제
+      if (_isSpeaking) {
+        _isSpeaking = false;
+        _speakingController.add(false);
+        _socketService.emitVoiceSpeaking(
+          _currentSessionId ?? '',
+          isSpeaking: false,
+        );
+      }
+    } else {
+      producer.resume();
+    }
+
+    _mutedController.add(_isMuted);
+  }
+
+  // ── VAD: 주기적으로 send transport stats를 폴링해 오디오 레벨 확인 ──────
+  void _startVad() {
+    _vadTimer?.cancel();
+    _vadTimer = Timer.periodic(
+      const Duration(milliseconds: _kVadIntervalMs),
+      (_) => _checkAudioLevel(),
+    );
+  }
+
+  void _stopVad() {
+    _vadTimer?.cancel();
+    _vadTimer = null;
+    if (_isSpeaking) {
+      _isSpeaking = false;
+      _speakingController.add(false);
+    }
+  }
+
+  Future<void> _checkAudioLevel() async {
+    if (_isMuted || _sendTransport == null) return;
+
+    try {
+      final stats = await _sendTransport!.getState();
+      double? level;
+      for (final report in stats) {
+        final raw = report.values['audioLevel'];
+        if (raw != null) {
+          level = (raw as num).toDouble();
+          break;
+        }
+      }
+
+      if (level == null) return;
+
+      final nowSpeaking = level >= _kSpeakingThreshold;
+      final now = DateTime.now();
+
+      if (nowSpeaking) {
+        _lastSpeakingAt = now;
+        if (!_isSpeaking) {
+          _isSpeaking = true;
+          _speakingController.add(true);
+          final sessionId = _currentSessionId;
+          if (sessionId != null && sessionId.isNotEmpty) {
+            _socketService.emitVoiceSpeaking(sessionId, isSpeaking: true);
+          }
+        }
+      } else if (_isSpeaking) {
+        final elapsed = _lastSpeakingAt == null
+            ? _kSpeakingDebounceMs + 1
+            : now.difference(_lastSpeakingAt!).inMilliseconds;
+        if (elapsed >= _kSpeakingDebounceMs) {
+          _isSpeaking = false;
+          _speakingController.add(false);
+          final sessionId = _currentSessionId;
+          if (sessionId != null && sessionId.isNotEmpty) {
+            _socketService.emitVoiceSpeaking(sessionId, isSpeaking: false);
+          }
+        }
+      }
+    } catch (_) {
+      // transport가 닫혔거나 stats 미지원 시 조용히 무시
     }
   }
 
@@ -456,6 +567,8 @@ class MediaSoupAudioService {
   }
 
   Future<void> _closeMediaState({required bool clearSession}) async {
+    _stopVad();
+
     for (final completer in _pendingConsumerCompleters.values) {
       if (!completer.isCompleted) {
         completer.complete();
@@ -507,5 +620,7 @@ class MediaSoupAudioService {
     _connectionSub = null;
     _newProducerSub = null;
     _producerClosedSub = null;
+    await _mutedController.close();
+    await _speakingController.close();
   }
 }

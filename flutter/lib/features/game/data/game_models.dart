@@ -29,6 +29,9 @@ class GameMission {
   final String type;   // 'qr_scan' | 'mini_game' | 'stay'
   final String status; // 'pending' | 'in_progress' | 'completed'
   final bool isFake;
+  /// 미션 수행 위치 (playable_area가 설정된 경우에만 존재)
+  final double? lat;
+  final double? lng;
 
   const GameMission({
     required this.id,
@@ -37,18 +40,23 @@ class GameMission {
     required this.type,
     required this.status,
     required this.isFake,
+    this.lat,
+    this.lng,
   });
 
   factory GameMission.fromMap(Map<String, dynamic> map) => GameMission(
-        id:     map['missionId'] as String,
+        id:     map['missionId'] as String? ?? map['id'] as String,
         title:  map['title']     as String? ?? '',
         zone:   map['zone']      as String? ?? '',
         type:   map['type']      as String? ?? 'mini_game',
         status: map['status']    as String? ?? 'pending',
         isFake: map['isFake']    as bool?   ?? false,
+        lat:    (map['lat']      as num?)?.toDouble(),
+        lng:    (map['lng']      as num?)?.toDouble(),
       );
 
   bool get isCompleted => status == 'completed';
+  bool get hasLocation => lat != null && lng != null;
 }
 
 // ── 투표 결과 ──────────────────────────────────────────────────────────────────
@@ -113,6 +121,12 @@ class AmongUsGameState {
   final bool isAlive;
   final int preVoteCount;
   final bool shouldNavigateToRole;
+  /// 호스트가 설정한 플레이 가능 영역 폴리곤 좌표 목록.
+  /// 설정된 경우 이탈 경고 및 미션 활성화 판정에 사용됩니다.
+  final List<Map<String, double>>? playableArea;
+  /// 현재 플레이어의 위치가 활성화 반경(15m) 이내에 있는 미션 ID 목록.
+  /// 이 목록에 포함된 미션만 '수행하기' 버튼이 활성화됩니다.
+  final List<String> nearbyMissionIds;
 
   const AmongUsGameState({
     this.isStarted        = false,
@@ -133,6 +147,8 @@ class AmongUsGameState {
     this.isAlive          = true,
     this.preVoteCount     = 0,
     this.shouldNavigateToRole = false,
+    this.playableArea,
+    this.nearbyMissionIds = const [],
   });
 
   AmongUsGameState copyWith({
@@ -150,6 +166,8 @@ class AmongUsGameState {
     bool? isAlive,
     int? preVoteCount,
     bool? shouldNavigateToRole,
+    List<Map<String, double>>? playableArea,
+    List<String>? nearbyMissionIds,
   }) =>
       AmongUsGameState(
         isStarted:        isStarted        ?? this.isStarted,
@@ -167,5 +185,7 @@ class AmongUsGameState {
         preVoteCount:     preVoteCount     ?? this.preVoteCount,
         shouldNavigateToRole:
             shouldNavigateToRole ?? this.shouldNavigateToRole,
+        playableArea:     playableArea     ?? this.playableArea,
+        nearbyMissionIds: nearbyMissionIds ?? this.nearbyMissionIds,
       );
 }

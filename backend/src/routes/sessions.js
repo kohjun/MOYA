@@ -90,6 +90,44 @@ export default async function sessionRoutes(fastify) {
     return reply.code(201).send({ session });
   });
 
+  // ── 플레이 가능 영역(폴리곤) 설정 (호스트 전용) ──────────────────────────────
+  fastify.patch('/:sessionId/playable-area', async (request, reply) => {
+    const { sessionId } = request.params;
+    const { polygonPoints } = request.body || {};
+
+    if (!Array.isArray(polygonPoints) || polygonPoints.length < 3) {
+      return reply.code(400).send({ error: 'INVALID_POLYGON' });
+    }
+
+    // 각 포인트가 {lat, lng} 형태인지 검증
+    const isValidPoints = polygonPoints.every(
+      (p) =>
+        typeof p === 'object' &&
+        typeof p.lat === 'number' &&
+        typeof p.lng === 'number',
+    );
+    if (!isValidPoints) {
+      return reply.code(400).send({ error: 'INVALID_POINT_FORMAT' });
+    }
+
+    try {
+      const result = await sessionService.setPlayableArea(
+        request.user.id,
+        sessionId,
+        polygonPoints,
+      );
+      return reply.send({ playableArea: result.playable_area });
+    } catch (err) {
+      if (err.message === 'SESSION_NOT_FOUND_OR_NOT_HOST') {
+        return reply.code(403).send({ error: err.message });
+      }
+      if (err.message === 'INVALID_POLYGON') {
+        return reply.code(400).send({ error: err.message });
+      }
+      throw err;
+    }
+  });
+
   fastify.post('/:sessionId/end', async (request, reply) => {
     try {
       const { sessionId } = request.params;

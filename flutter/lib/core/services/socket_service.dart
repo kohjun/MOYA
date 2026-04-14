@@ -146,6 +146,8 @@ class SocketService {
       StreamController<Map<String, dynamic>>.broadcast();
   final _mediaProducerClosedController =
       StreamController<Map<String, dynamic>>.broadcast();
+  final _voiceSpeakingController =
+      StreamController<Map<String, dynamic>>.broadcast();
   final Map<String, StreamController<Map<String, dynamic>>>
       _gameEventControllers = {};
 
@@ -177,6 +179,8 @@ class SocketService {
       _mediaNewProducerController.stream;
   Stream<Map<String, dynamic>> get onMediaProducerClosed =>
       _mediaProducerClosedController.stream;
+  Stream<Map<String, dynamic>> get onVoiceSpeaking =>
+      _voiceSpeakingController.stream;
 
   bool get isConnected => _isConnected;
   String? get currentSessionId => _currentSessionId;
@@ -327,6 +331,10 @@ class SocketService {
       ..on(
           SocketEvents.mediaProducerClosed,
           (data) => _mediaProducerClosedController
+              .add(Map<String, dynamic>.from(data as Map? ?? {})))
+      ..on(
+          'voice:speaking',
+          (data) => _voiceSpeakingController
               .add(Map<String, dynamic>.from(data as Map? ?? {})))
       ..on(gameStarted, (data) {
         _emitGameEvent(gameStarted, data);
@@ -703,6 +711,14 @@ class SocketService {
             : {'ok': false, 'error': 'INVALID_AI_ACK'},
       ),
     );
+  }
+
+  void emitVoiceSpeaking(String sessionId, {required bool isSpeaking}) {
+    if (!_isConnected) return;
+    _socket?.emit('voice:speaking', {
+      'sessionId': sessionId,
+      'isSpeaking': isSpeaking,
+    });
   }
 
   Stream<Map<String, dynamic>> onGameEvent(String event) {

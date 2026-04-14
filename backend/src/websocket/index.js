@@ -61,6 +61,7 @@ export const EVENTS = {
   VOTE_RESULT:        'vote:result',
   MEDIA_NEW_PRODUCER:   'media:newProducer',
   MEDIA_PRODUCER_CLOSED:'media:producerClosed',
+  VOICE_SPEAKING:     'voice:speaking',
   ERROR:              'error',
 
   // Amongus Client → Server
@@ -744,12 +745,13 @@ export const createSocketServer = (
         const isImpostor = gameState.impostors.includes(userId);
 
         const roomLike = {
-          roomId:    sessionId,
-          gameType:  'among_us',
-          status:    gameState.status,
-          killLog:   gameState.killLog || [],
-          players:   new Map(
-            gameState.alivePlayerIds.map((id) => [id, {
+          roomId:         sessionId,
+          gameType:       'among_us',
+          status:         gameState.status,
+          killLog:        gameState.killLog || [],
+          alivePlayerIds: gameState.alivePlayerIds || [],
+          players:        new Map(
+            (gameState.alivePlayerIds || []).map((id) => [id, {
               userId: id,
               isAlive: true,
               team: gameState.impostors.includes(id) ? 'impostor' : 'crew',
@@ -787,6 +789,16 @@ export const createSocketServer = (
           errorCode: 'AI_UNAVAILABLE',
         });
       }
+    });
+
+    // ── voice:speaking ────────────────────────────────────────────────
+    socket.on(EVENTS.VOICE_SPEAKING, ({ sessionId: sid, isSpeaking }) => {
+      const sessionId = sid || socket.currentSessionId;
+      if (!sessionId) return;
+      socket.to(`session:${sessionId}`).emit(EVENTS.VOICE_SPEAKING, {
+        userId,
+        isSpeaking: !!isSpeaking,
+      });
     });
 
     // ── game:request_state ────────────────────────────────────────────

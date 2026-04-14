@@ -63,6 +63,13 @@ Future<void> main() async {
       _logUnhandledError('FCM background handler', e, stackTrace);
     }
 
+    // NaverMap SDK 초기화 (NaverMap 위젯 렌더링 전에 반드시 완료되어야 함)
+    try {
+      await AppInitializationService().ensureNaverMapInitialized();
+    } catch (e, stackTrace) {
+      _logUnhandledError('NaverMap init', e, stackTrace);
+    }
+
     // SharedPreferences를 첫 프레임 전에 미리 warm-up합니다.
     // 이후 getInstance() 호출이 즉시 반환되어 resetBackgroundFlags 지연이 사라집니다.
     unawaited(

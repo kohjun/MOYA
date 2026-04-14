@@ -204,6 +204,10 @@ const migrations = [
   `ALTER TABLE session_members ADD COLUMN IF NOT EXISTS game_team VARCHAR(20)`,
   `ALTER TABLE session_members ADD COLUMN IF NOT EXISTS currency INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE session_members ADD COLUMN IF NOT EXISTS zone VARCHAR(100)`,
+
+  // ─── 플레이어블 영역 (폴리곤 좌표 배열) ───────────────────
+  // [{lat: number, lng: number}, ...] 형태의 JSONB 배열
+  `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS playable_area JSONB DEFAULT NULL`,
 ];
 
 (async () => {

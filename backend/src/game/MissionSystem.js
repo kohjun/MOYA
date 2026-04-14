@@ -13,12 +13,14 @@ function progressKey(sessionId) {
 
 /**
  * 크루원/임포스터에게 미션 배정 후 Redis에 저장
- * @param {object} session  { id, mission_per_crew }
+ * session.playable_area 가 있으면 폴리곤 내부 랜덤 좌표를 각 미션에 할당합니다.
+ * @param {object} session  { id, mission_per_crew, playable_area? }
  * @param {Array}  members  [{ user_id, game_role }]
  */
 export async function assignMissions(session, members) {
   const sessionId      = session.id;
   const perCrew        = session.mission_per_crew ?? 3;
+  const polygon        = session.playable_area ?? null; // [{lat, lng}, ...]
   const missionPool    = generateMissionPool(perCrew * members.length);
 
   let poolIndex  = 0;
@@ -30,12 +32,17 @@ export async function assignMissions(session, members) {
     const assigned   = [];
 
     for (let i = 0; i < count; i++) {
+      const template = missionPool[poolIndex % missionPool.length];
+      const coord    = polygon ? randomPointInPolygon(polygon) : null;
+
       assigned.push({
-        id:       `${sessionId}_m${poolIndex}`,
-        title:    isImpostor ? `[가짜] ${missionPool[poolIndex % missionPool.length].title}` : missionPool[poolIndex % missionPool.length].title,
-        description: missionPool[poolIndex % missionPool.length].description,
-        fake:     isImpostor,
-        done:     false,
+        id:          `${sessionId}_m${poolIndex}`,
+        title:       isImpostor ? `[가짜] ${template.title}` : template.title,
+        description: template.description,
+        fake:        isImpostor,
+        done:        false,
+        lat:         coord?.lat ?? null,
+        lng:         coord?.lng ?? null,
       });
       poolIndex++;
     }
@@ -124,6 +131,60 @@ export async function clearSession(sessionId) {
 }
 
 // ─── 내부 헬퍼 ──────────────────────────────────────────────────────────────
+
+/**
+ * Ray-Casting 알고리즘으로 점이 폴리곤 내부에 있는지 판별
+ * @param {{ lat: number, lng: number }} point
+ * @param {Array<{ lat: number, lng: number }>} polygon  최소 3개 꼭짓점
+ * @returns {boolean}
+ */
+export function pointInPolygon(point, polygon) {
+  const { lat: y, lng: x } = point;
+  const n = polygon.length;
+  let inside = false;
+
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    const xi = polygon[i].lng, yi = polygon[i].lat;
+    const xj = polygon[j].lng, yj = polygon[j].lat;
+
+    const intersect =
+      yi > y !== yj > y &&
+      x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
+
+    if (intersect) inside = !inside;
+  }
+
+  return inside;
+}
+
+/**
+ * 폴리곤 내부의 랜덤 좌표 생성 (바운딩 박스 + 거절 샘플링)
+ * @param {Array<{ lat: number, lng: number }>} polygon
+ * @param {number} [maxRetries=60]
+ * @returns {{ lat: number, lng: number }}
+ */
+export function randomPointInPolygon(polygon, maxRetries = 60) {
+  // 바운딩 박스 계산
+  const lats = polygon.map((p) => p.lat);
+  const lngs = polygon.map((p) => p.lng);
+  const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+  const minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
+
+  for (let i = 0; i < maxRetries; i++) {
+    const candidate = {
+      lat: minLat + Math.random() * (maxLat - minLat),
+      lng: minLng + Math.random() * (maxLng - minLng),
+    };
+    if (pointInPolygon(candidate, polygon)) return candidate;
+  }
+
+  // 거절 샘플링 실패 시 폴리곤 무게 중심으로 폴백
+  const centroid = {
+    lat: lats.reduce((a, b) => a + b, 0) / lats.length,
+    lng: lngs.reduce((a, b) => a + b, 0) / lngs.length,
+  };
+  return centroid;
+}
 
 async function getProgress(sessionId) {
   const data = await redisClient.get(progressKey(sessionId));

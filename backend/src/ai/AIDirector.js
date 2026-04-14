@@ -84,7 +84,7 @@ async function askWithModel({ model, systemPrompt, history, question }) {
   const chatSession = createGenerativeModel(model, systemPrompt).startChat({
     history,
     generationConfig: {
-      maxOutputTokens: 850,
+      maxOutputTokens: 1500,
       temperature: 0.7,
     },
   });
@@ -183,6 +183,7 @@ async function ask(room, player, question) {
       plugin.getSystemPrompt(player.roleId, player.nickname),
       found ? `\n[관련 게임 규칙]\n${context}` : '',
       `\n[현재 게임 상황]\n${plugin.buildStateContext(room, player)}`,
+      '\n[응답 규칙] 답변은 반드시 완성된 문장으로 마무리해. 중간에 끊기지 말고 자연스럽게 끝내.',
     ].join('\n');
 
     // Redis에서 전체 기록 로드 후 Gemini 포맷으로 변환

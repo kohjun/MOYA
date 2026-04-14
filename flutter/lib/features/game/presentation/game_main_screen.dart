@@ -60,6 +60,59 @@ class _GameMainScreenState extends ConsumerState<GameMainScreen>
   }
   // ─────────────────────────────────────────────────────────────────────────────
 
+  // ── [Stage 2] 구역 이탈 경고 ────────────────────────────────────────────────
+  bool _isOutOfBounds = false;
+  bool _boundsAlertPulse = false; // 오버레이 맥박 애니메이션
+  Timer? _boundsAlertTimer;
+  StreamSubscription<Position>? _boundsCheckSub;
+
+  /// Ray-Casting 알고리즘: 점이 폴리곤 내부에 있으면 true
+  static bool _pointInPolygon(
+      double lat, double lng, List<Map<String, double>> polygon) {
+    final n = polygon.length;
+    if (n < 3) return false;
+    var inside = false;
+    for (int i = 0, j = n - 1; i < n; j = i++) {
+      final xi = polygon[i]['lng']!, yi = polygon[i]['lat']!;
+      final xj = polygon[j]['lng']!, yj = polygon[j]['lat']!;
+      final intersect =
+          ((yi > lat) != (yj > lat)) && (lng < (xj - xi) * (lat - yi) / (yj - yi) + xi);
+      if (intersect) inside = !inside;
+    }
+    return inside;
+  }
+
+  void _startBoundsCheck(List<Map<String, double>> area) {
+    _boundsCheckSub?.cancel();
+    _boundsCheckSub = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 3, // 3m 이상 이동 시에만 재판정
+      ),
+    ).listen((pos) {
+      if (!mounted) return;
+      final outside = !_pointInPolygon(pos.latitude, pos.longitude, area);
+      if (outside == _isOutOfBounds) return;
+      setState(() => _isOutOfBounds = outside);
+      if (outside) {
+        // 맥박 타이머 시작 (경고 오버레이 빛남 효과)
+        _boundsAlertTimer?.cancel();
+        _boundsAlertTimer =
+            Timer.periodic(const Duration(milliseconds: 700), (_) {
+          if (!mounted) {
+            _boundsAlertTimer?.cancel();
+            return;
+          }
+          setState(() => _boundsAlertPulse = !_boundsAlertPulse);
+        });
+      } else {
+        _boundsAlertTimer?.cancel();
+        setState(() => _boundsAlertPulse = false);
+      }
+    });
+  }
+  // ─────────────────────────────────────────────────────────────────────────────
+
   // ── [Task 3] KILL 쿨타임 ─────────────────────────────────────────────────
   static const int _kKillCooldownDefault = 30;
   int _killCooldownSecs = 0;
@@ -102,14 +155,29 @@ class _GameMainScreenState extends ConsumerState<GameMainScreen>
       final sessions =
           ref.read(sessionListProvider).valueOrNull ?? const <Session>[];
       final match = sessions.where((s) => s.id == widget.sessionId);
-      _killCooldownDuration =
-          match.isEmpty ? _kKillCooldownDefault : match.first.killCooldown;
+      if (match.isNotEmpty) {
+        final session = match.first;
+        _killCooldownDuration = session.killCooldown;
+
+        // [Stage 2] 플레이 가능 영역이 설정된 경우 구역 이탈 감지 시작
+        final area = session.playableArea;
+        if (area != null && area.length >= 3) {
+          ref
+              .read(gameProvider(widget.sessionId).notifier)
+              .setPlayableArea(area);
+          _startBoundsCheck(area);
+        }
+      } else {
+        _killCooldownDuration = _kKillCooldownDefault;
+      }
     });
   }
 
   @override
   void dispose() {
-    _killCooldownTimer?.cancel(); // KILL 쿨타임 타이머 정리
+    _killCooldownTimer?.cancel();
+    _boundsCheckSub?.cancel();   // [Stage 2] 구역 이탈 GPS 구독 해제
+    _boundsAlertTimer?.cancel(); // [Stage 2] 맥박 타이머 해제
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -361,158 +429,7 @@ class _GameMainScreenState extends ConsumerState<GameMainScreen>
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (context) {
-        final gameState = ref.read(gameProvider(widget.sessionId));
-        final completed =
-            (gameState.missionProgress['completed'] as num?)?.toInt() ?? 0;
-        final total =
-            (gameState.missionProgress['total'] as num?)?.toInt() ?? 0;
-        final rawPercent =
-            (gameState.missionProgress['percent'] as num?)?.toDouble() ??
-                (total > 0 ? completed / total : 0);
-        final progress = ((rawPercent > 1 ? rawPercent / 100 : rawPercent)
-                .clamp(0.0, 1.0) as num)
-            .toDouble();
-
-        return DraggableScrollableSheet(
-          expand: false,
-          initialChildSize: 0.5,
-          minChildSize: 0.35,
-          maxChildSize: 0.85,
-          builder: (context, scrollController) {
-            return DecoratedBox(
-              decoration: const BoxDecoration(
-                color: Color(0xFFF7F8FB),
-                borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-              ),
-              child: SafeArea(
-                top: false,
-                child: Column(
-                  children: [
-                    const SizedBox(height: 12),
-                    Container(
-                      width: 44,
-                      height: 4,
-                      decoration: BoxDecoration(
-                        color: Colors.grey.shade400,
-                        borderRadius: BorderRadius.circular(999),
-                      ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text('미션 목록',
-                              style: TextStyle(
-                                  fontSize: 20, fontWeight: FontWeight.w700)),
-                          const SizedBox(height: 10),
-                          Text(
-                              '진행도 $completed / $total (${(progress * 100).round()}%)',
-                              style: TextStyle(color: Colors.grey.shade700)),
-                          const SizedBox(height: 8),
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(999),
-                            child: LinearProgressIndicator(
-                              value: progress,
-                              minHeight: 10,
-                              backgroundColor:
-                                  Colors.green.withValues(alpha: 0.15),
-                              valueColor: const AlwaysStoppedAnimation<Color>(
-                                  Colors.green),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Expanded(
-                      child: gameState.missions.isEmpty
-                          ? Center(
-                              child: Text('표시할 미션이 아직 없습니다.',
-                                  style:
-                                      TextStyle(color: Colors.grey.shade600)))
-                          : ListView.separated(
-                              controller: scrollController,
-                              padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
-                              itemCount: gameState.missions.length,
-                              separatorBuilder: (_, __) =>
-                                  const SizedBox(height: 12),
-                              itemBuilder: (context, index) {
-                                final mission = gameState.missions[index];
-                                final isDone = mission.isCompleted;
-                                return Container(
-                                  padding: const EdgeInsets.all(16),
-                                  decoration: BoxDecoration(
-                                    color: Colors.white,
-                                    borderRadius: BorderRadius.circular(18),
-                                    border: Border.all(
-                                      color: isDone
-                                          ? Colors.green.withValues(alpha: 0.35)
-                                          : Colors.grey.shade200,
-                                    ),
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Container(
-                                        width: 42,
-                                        height: 42,
-                                        decoration: BoxDecoration(
-                                          color: isDone
-                                              ? Colors.green
-                                                  .withValues(alpha: 0.14)
-                                              : Colors.orange
-                                                  .withValues(alpha: 0.12),
-                                          shape: BoxShape.circle,
-                                        ),
-                                        child: Icon(
-                                          isDone
-                                              ? Icons.check_rounded
-                                              : Icons
-                                                  .assignment_turned_in_outlined,
-                                          color: isDone
-                                              ? Colors.green
-                                              : Colors.orange,
-                                        ),
-                                      ),
-                                      const SizedBox(width: 14),
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                                mission.title.isEmpty
-                                                    ? mission.id
-                                                    : mission.title,
-                                                style: const TextStyle(
-                                                    fontWeight: FontWeight.w700,
-                                                    fontSize: 15)),
-                                            const SizedBox(height: 4),
-                                            Text(
-                                                [
-                                                  if (mission.zone.isNotEmpty)
-                                                    mission.zone,
-                                                  mission.status
-                                                ].join(' • '),
-                                                style: TextStyle(
-                                                    color:
-                                                        Colors.grey.shade600)),
-                                          ],
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                );
-                              },
-                            ),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          },
-        );
-      },
+      builder: (_) => _MissionBottomSheet(sessionId: widget.sessionId),
     );
   }
 
@@ -824,6 +741,78 @@ class _GameMainScreenState extends ConsumerState<GameMainScreen>
                   ),
                 ),
 
+              // ── [Stage 2] 구역 이탈 경고 오버레이 ──────────────────────────
+              // playableArea가 설정되어 있고 플레이어가 영역 밖에 있을 때 표시
+              // IgnorePointer: true → 사용자가 UI를 계속 조작할 수 있음
+              if (_isOutOfBounds)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 700),
+                      color: Colors.red.withValues(
+                          alpha: _boundsAlertPulse ? 0.40 : 0.22),
+                      child: Center(
+                        child: AnimatedScale(
+                          scale: _boundsAlertPulse ? 1.04 : 1.0,
+                          duration: const Duration(milliseconds: 700),
+                          curve: Curves.easeInOut,
+                          child: Container(
+                            margin: const EdgeInsets.symmetric(horizontal: 32),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 24, vertical: 20),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF7F1D1D).withValues(alpha: 0.92),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                color: Colors.red.shade300.withValues(alpha: 0.8),
+                                width: 1.5,
+                              ),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.red.withValues(alpha: 0.4),
+                                  blurRadius: 24,
+                                  spreadRadius: 4,
+                                ),
+                              ],
+                            ),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.fmd_bad_rounded,
+                                  color: Colors.red.shade200,
+                                  size: 44,
+                                ),
+                                const SizedBox(height: 12),
+                                const Text(
+                                  '플레이 구역을 벗어났습니다!',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.w800,
+                                    letterSpacing: -0.3,
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                Text(
+                                  '구역으로 돌아가주세요',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    color: Colors.red.shade200,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+
               // 오프라인(네트워크 단절) 경고 배너
               if (!isConnected)
                 Positioned(
@@ -885,6 +874,690 @@ class _GameMainScreenState extends ConsumerState<GameMainScreen>
         ),
       ), // Scaffold
     ); // PopScope
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// [Stage 3] 미션 BottomSheet
+// ConsumerStatefulWidget으로 ref.watch를 사용해 실시간 상태 반영
+// ══════════════════════════════════════════════════════════════════════════════
+
+class _MissionBottomSheet extends ConsumerStatefulWidget {
+  const _MissionBottomSheet({required this.sessionId});
+  final String sessionId;
+
+  @override
+  ConsumerState<_MissionBottomSheet> createState() =>
+      _MissionBottomSheetState();
+}
+
+class _MissionBottomSheetState extends ConsumerState<_MissionBottomSheet> {
+  // 확장된 미션 ID 집합 — 탭하면 상세설명 토글
+  final Set<String> _expandedIds = {};
+
+  void _toggleExpand(String id) =>
+      setState(() => _expandedIds.contains(id)
+          ? _expandedIds.remove(id)
+          : _expandedIds.add(id));
+
+  /// [Stage 4] 미션 완료 처리 — 소켓으로 완료 이벤트 전송 + 피드백 표시
+  void _completeMission(BuildContext ctx, String missionId) {
+    ref
+        .read(gameProvider(widget.sessionId).notifier)
+        .completeMission(missionId);
+
+    // 확장 패널 닫기
+    setState(() => _expandedIds.remove(missionId));
+
+    ScaffoldMessenger.of(ctx).showSnackBar(
+      SnackBar(
+        content: const Row(
+          children: [
+            Icon(Icons.check_circle_outline_rounded,
+                color: Colors.white, size: 18),
+            SizedBox(width: 10),
+            Text('미션을 완료했습니다!',
+                style: TextStyle(fontWeight: FontWeight.w600)),
+          ],
+        ),
+        backgroundColor: const Color(0xFF10B981),
+        duration: const Duration(seconds: 2),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // ref.watch → 미션 완료 이벤트 수신 시 즉시 리빌드
+    final gameState = ref.watch(gameProvider(widget.sessionId));
+    final missions = gameState.missions;
+
+    final completed =
+        (gameState.missionProgress['completed'] as num?)?.toInt() ?? 0;
+    final total =
+        (gameState.missionProgress['total'] as num?)?.toInt() ?? 0;
+    final rawPercent =
+        (gameState.missionProgress['percent'] as num?)?.toDouble() ??
+            (total > 0 ? completed / total : 0.0);
+    final progress = ((rawPercent > 1 ? rawPercent / 100 : rawPercent)
+            .clamp(0.0, 1.0) as num)
+        .toDouble();
+
+    // 역할에 따른 강조색
+    final isImpostor = gameState.myRole?.isImpostor == true;
+    final accentColor = isImpostor ? const Color(0xFFEF4444) : const Color(0xFF10B981);
+
+    // 미완료 / 완료 분리
+    final pending = missions.where((m) => !m.isCompleted).toList();
+    final done = missions.where((m) => m.isCompleted).toList();
+
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.6,
+      minChildSize: 0.4,
+      maxChildSize: 0.92,
+      builder: (_, scrollCtrl) {
+        return DecoratedBox(
+          decoration: const BoxDecoration(
+            color: Color(0xFF0F172A),
+            borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+          ),
+          child: SafeArea(
+            top: false,
+            child: Column(
+              children: [
+                // ── 핸들 ──────────────────────────────────────────────────
+                const SizedBox(height: 12),
+                Center(
+                  child: Container(
+                    width: 44,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.25),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 20),
+
+                // ── 헤더 ──────────────────────────────────────────────────
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 36,
+                        height: 36,
+                        decoration: BoxDecoration(
+                          color: accentColor.withValues(alpha: 0.18),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Icon(Icons.assignment_rounded,
+                            color: accentColor, size: 20),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              isImpostor ? '임포스터 미션' : '내 미션',
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w700),
+                            ),
+                            Text(
+                              total > 0
+                                  ? '전체 진행도 $completed / $total'
+                                  : '미션이 아직 배정되지 않았습니다',
+                              style: TextStyle(
+                                  color: Colors.white.withValues(alpha: 0.55),
+                                  fontSize: 12),
+                            ),
+                          ],
+                        ),
+                      ),
+                      // 완료 카운트 뱃지
+                      if (missions.isNotEmpty)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 5),
+                          decoration: BoxDecoration(
+                            color: accentColor.withValues(alpha: 0.18),
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                          child: Text(
+                            '${done.length}/${missions.length}',
+                            style: TextStyle(
+                                color: accentColor,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w700),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 14),
+
+                // ── 전체 크루 진행 Progress Bar ──────────────────────────
+                // GameProvider의 missionProgress와 실시간 연동
+                if (total > 0)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              '전체 크루 미션 진행도',
+                              style: TextStyle(
+                                  color:
+                                      Colors.white.withValues(alpha: 0.6),
+                                  fontSize: 11),
+                            ),
+                            Text(
+                              '${(progress * 100).round()}%',
+                              style: TextStyle(
+                                  color: accentColor,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(999),
+                          child: TweenAnimationBuilder<double>(
+                            tween: Tween(begin: 0.0, end: progress),
+                            duration: const Duration(milliseconds: 600),
+                            curve: Curves.easeOut,
+                            builder: (_, val, __) => LinearProgressIndicator(
+                              value: val,
+                              minHeight: 8,
+                              backgroundColor:
+                                  Colors.white.withValues(alpha: 0.08),
+                              valueColor:
+                                  AlwaysStoppedAnimation<Color>(accentColor),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                const SizedBox(height: 16),
+                Divider(
+                    height: 1,
+                    color: Colors.white.withValues(alpha: 0.08)),
+                const SizedBox(height: 4),
+
+                // ── 미션 목록 ─────────────────────────────────────────────
+                Expanded(
+                  child: missions.isEmpty
+                      ? Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.hourglass_empty_rounded,
+                                  color: Colors.white.withValues(alpha: 0.25),
+                                  size: 44),
+                              const SizedBox(height: 12),
+                              Text(
+                                '게임이 시작되면\n미션이 배정됩니다',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                    color:
+                                        Colors.white.withValues(alpha: 0.4),
+                                    fontSize: 14),
+                              ),
+                            ],
+                          ),
+                        )
+                      : ListView(
+                          controller: scrollCtrl,
+                          padding:
+                              const EdgeInsets.fromLTRB(16, 0, 16, 32),
+                          children: [
+                            // 미완료 섹션
+                            if (pending.isNotEmpty) ...[
+                              _SectionHeader(
+                                label: '남은 미션',
+                                count: pending.length,
+                                color: Colors.amber.shade400,
+                              ),
+                              const SizedBox(height: 8),
+                              ...pending.map((m) => Padding(
+                                    padding: const EdgeInsets.only(bottom: 10),
+                                    child: _MissionCard(
+                                      mission: m,
+                                      isExpanded:
+                                          _expandedIds.contains(m.id),
+                                      onTap: () => _toggleExpand(m.id),
+                                      // [Stage 4] 위치가 없는 미션은 항상 활성화,
+                                      // 위치가 있는 미션은 반경 내에 있을 때만 활성화
+                                      onComplete: m.isFake
+                                          ? null
+                                          : (!m.hasLocation ||
+                                                  gameState.nearbyMissionIds
+                                                      .contains(m.id))
+                                              ? () => _completeMission(
+                                                  context, m.id)
+                                              : null,
+                                    ),
+                                  )),
+                            ],
+
+                            // 완료 섹션
+                            if (done.isNotEmpty) ...[
+                              const SizedBox(height: 4),
+                              _SectionHeader(
+                                label: '완료된 미션',
+                                count: done.length,
+                                color: Colors.green.shade400,
+                              ),
+                              const SizedBox(height: 8),
+                              ...done.map((m) => Padding(
+                                    padding: const EdgeInsets.only(bottom: 10),
+                                    child: _MissionCard(
+                                      mission: m,
+                                      isExpanded:
+                                          _expandedIds.contains(m.id),
+                                      onTap: () => _toggleExpand(m.id),
+                                      onComplete: null,
+                                    ),
+                                  )),
+                            ],
+                          ],
+                        ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ── 섹션 헤더 ─────────────────────────────────────────────────────────────────
+
+class _SectionHeader extends StatelessWidget {
+  const _SectionHeader({
+    required this.label,
+    required this.count,
+    required this.color,
+  });
+
+  final String label;
+  final int count;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Row(
+        children: [
+          Container(
+            width: 4,
+            height: 14,
+            decoration: BoxDecoration(
+              color: color,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            label,
+            style: TextStyle(
+              color: color,
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.5,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Container(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(999),
+            ),
+            child: Text(
+              '$count',
+              style: TextStyle(
+                  color: color,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── 미션 카드 ─────────────────────────────────────────────────────────────────
+
+class _MissionCard extends StatelessWidget {
+  const _MissionCard({
+    required this.mission,
+    required this.isExpanded,
+    required this.onTap,
+    required this.onComplete, // null이면 버튼 비활성화
+  });
+
+  final GameMission mission;
+  final bool isExpanded;
+  final VoidCallback onTap;
+  final VoidCallback? onComplete;
+
+  @override
+  Widget build(BuildContext context) {
+    final isDone = mission.isCompleted;
+    final isFake = mission.isFake;
+
+    // 상태별 색상
+    final cardBg = isDone
+        ? const Color(0xFF14532D).withValues(alpha: 0.55)
+        : isFake
+            ? const Color(0xFF450A0A).withValues(alpha: 0.55)
+            : const Color(0xFF1E293B);
+
+    final borderColor = isDone
+        ? const Color(0xFF16A34A).withValues(alpha: 0.5)
+        : isFake
+            ? const Color(0xFFEF4444).withValues(alpha: 0.4)
+            : Colors.white.withValues(alpha: 0.07);
+
+    final iconBg = isDone
+        ? const Color(0xFF166534).withValues(alpha: 0.6)
+        : isFake
+            ? const Color(0xFF7F1D1D).withValues(alpha: 0.6)
+            : const Color(0xFF334155);
+
+    final iconColor = isDone
+        ? const Color(0xFF4ADE80)
+        : isFake
+            ? const Color(0xFFF87171)
+            : const Color(0xFF94A3B8);
+
+    final icon = isDone
+        ? Icons.check_circle_rounded
+        : isFake
+            ? Icons.warning_amber_rounded
+            : Icons.radio_button_unchecked_rounded;
+
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeInOut,
+        decoration: BoxDecoration(
+          color: cardBg,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: borderColor, width: 1),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // ── 카드 헤더 행 ─────────────────────────────────────────────
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 14, 14, 0),
+              child: Row(
+                children: [
+                  // 상태 아이콘
+                  Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                        color: iconBg, shape: BoxShape.circle),
+                    child: Icon(icon, color: iconColor, size: 18),
+                  ),
+                  const SizedBox(width: 12),
+
+                  // 제목 + 뱃지들
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                mission.title.isEmpty
+                                    ? mission.id
+                                    : mission.title,
+                                style: TextStyle(
+                                  color: isDone
+                                      ? Colors.white.withValues(alpha: 0.5)
+                                      : Colors.white,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                  decoration: isDone
+                                      ? TextDecoration.lineThrough
+                                      : null,
+                                  decorationColor:
+                                      Colors.white.withValues(alpha: 0.3),
+                                ),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        // 뱃지 행
+                        Wrap(
+                          spacing: 5,
+                          runSpacing: 4,
+                          children: [
+                            if (isFake)
+                              const _Badge(
+                                  label: '가짜 미션',
+                                  color: Color(0xFFEF4444)),
+                            if (mission.hasLocation)
+                              const _Badge(
+                                  label: '📍 위치 있음',
+                                  color: Color(0xFF3B82F6)),
+                            if (mission.zone.isNotEmpty && !isFake)
+                              _Badge(
+                                  label: mission.zone,
+                                  color: const Color(0xFF64748B)),
+                            _Badge(
+                              label: _typeLabel(mission.type),
+                              color: const Color(0xFF475569),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  // 확장 화살표
+                  Icon(
+                    isExpanded
+                        ? Icons.keyboard_arrow_up_rounded
+                        : Icons.keyboard_arrow_down_rounded,
+                    color: Colors.white.withValues(alpha: 0.35),
+                    size: 20,
+                  ),
+                ],
+              ),
+            ),
+
+            // ── 확장 영역: 상세 설명 + 수행하기 버튼 ───────────────────
+            AnimatedCrossFade(
+              firstChild: const SizedBox.shrink(),
+              secondChild: Padding(
+                padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // 구분선
+                    Divider(
+                        height: 1,
+                        color: Colors.white.withValues(alpha: 0.07)),
+                    const SizedBox(height: 12),
+
+                    // 상세 설명 (있을 때만)
+                    if (mission.zone.isNotEmpty) ...[
+                      _DetailRow(
+                          icon: Icons.place_outlined,
+                          text: mission.zone),
+                      const SizedBox(height: 6),
+                    ],
+                    if (mission.hasLocation) ...[
+                      _DetailRow(
+                        icon: Icons.my_location_rounded,
+                        text:
+                            '${mission.lat!.toStringAsFixed(6)}, ${mission.lng!.toStringAsFixed(6)}',
+                      ),
+                      const SizedBox(height: 6),
+                    ],
+                    _DetailRow(
+                      icon: Icons.info_outline_rounded,
+                      text: isFake
+                          ? '이 미션은 가짜입니다. 수행하는 척하며 크루를 속이세요.'
+                          : _typeDescription(mission.type),
+                    ),
+
+                    // 수행하기 버튼 — 위치 없는 미션은 항상 활성화
+                    //                위치 있는 미션은 반경 내에 있을 때만 활성화
+                    if (!isDone && !isFake) ...[
+                      const SizedBox(height: 14),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.icon(
+                          onPressed: onComplete,
+                          style: FilledButton.styleFrom(
+                            backgroundColor: onComplete != null
+                                ? const Color(0xFF10B981)
+                                : Colors.white.withValues(alpha: 0.08),
+                            foregroundColor: onComplete != null
+                                ? Colors.white
+                                : Colors.white.withValues(alpha: 0.3),
+                            padding:
+                                const EdgeInsets.symmetric(vertical: 11),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          icon: Icon(
+                            onComplete != null
+                                ? Icons.check_rounded
+                                : Icons.location_searching_rounded,
+                            size: 18,
+                          ),
+                          label: Text(
+                            onComplete != null
+                                ? '미션 수행하기'
+                                : mission.hasLocation
+                                    ? '📍 ${GameNotifier.kActivationRadius.toInt()}m 이내로 접근하면 활성화됩니다'
+                                    : '수행하기',
+                            style: const TextStyle(
+                                fontSize: 13, fontWeight: FontWeight.w600),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              crossFadeState: isExpanded
+                  ? CrossFadeState.showSecond
+                  : CrossFadeState.showFirst,
+              duration: const Duration(milliseconds: 220),
+            ),
+
+            const SizedBox(height: 14),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _typeLabel(String type) {
+    return switch (type) {
+      'qr_scan'   => 'QR 스캔',
+      'mini_game' => '미니게임',
+      'stay'      => '대기',
+      _           => type,
+    };
+  }
+
+  String _typeDescription(String type) {
+    return switch (type) {
+      'qr_scan'   => '해당 장소의 QR 코드를 스캔하여 완료하세요.',
+      'mini_game' => '미션 위치에서 미니게임을 완료하세요.',
+      'stay'      => '지정된 위치에 일정 시간 머물러 완료하세요.',
+      _           => '미션을 수행하여 완료하세요.',
+    };
+  }
+}
+
+// ── 뱃지 ─────────────────────────────────────────────────────────────────────
+
+class _Badge extends StatelessWidget {
+  const _Badge({required this.label, required this.color});
+
+  final String label;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.18),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+            color: color,
+            fontSize: 10,
+            fontWeight: FontWeight.w600),
+      ),
+    );
+  }
+}
+
+// ── 상세 정보 행 ──────────────────────────────────────────────────────────────
+
+class _DetailRow extends StatelessWidget {
+  const _DetailRow({required this.icon, required this.text});
+
+  final IconData icon;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon,
+            size: 14,
+            color: Colors.white.withValues(alpha: 0.4)),
+        const SizedBox(width: 7),
+        Expanded(
+          child: Text(
+            text,
+            style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.65),
+                fontSize: 12,
+                height: 1.5),
+          ),
+        ),
+      ],
+    );
   }
 }
 
@@ -1185,6 +1858,44 @@ class _MapMemberPanelToggle extends StatelessWidget {
   }
 }
 
+// ── verbal 모드 임포스터 킬 버튼 (지도 시트 전용) ─────────────────────────
+class _VerbalKillMapButton extends StatelessWidget {
+  const _VerbalKillMapButton({
+    required this.hasTarget,
+    required this.onKill,
+  });
+
+  final bool hasTarget;
+  final VoidCallback onKill;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      child: ElevatedButton.icon(
+        onPressed: onKill,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: hasTarget ? Colors.red : Colors.grey.shade600,
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          elevation: hasTarget ? 6 : 0,
+          shadowColor:
+              hasTarget ? Colors.red.withValues(alpha: 0.4) : Colors.transparent,
+        ),
+        icon: Icon(hasTarget
+            ? Icons.dangerous_rounded
+            : Icons.dangerous_outlined),
+        label: Text(
+          hasTarget ? '제거' : '범위 밖',
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+        ),
+      ),
+    );
+  }
+}
+
 class _GameMapSheet extends ConsumerStatefulWidget {
   const _GameMapSheet(
       {required this.sessionId,
@@ -1208,6 +1919,41 @@ class _GameMapSheetState extends ConsumerState<_GameMapSheet> {
   Set<String>? _previousHiddenMembers;
   Set<String>? _previousEliminatedUserIds;
   String? _previousUserId;
+
+  // ── 플레이 영역 폴리곤 캐시 ─────────────────────────────────────────────
+  NPolygonOverlay? _playableAreaPolygon;
+  List<Map<String, double>>? _prevPlayableArea;
+  bool _polygonScheduled = false;
+
+  NPolygonOverlay? _buildPlayableAreaPolygon(
+      List<Map<String, double>>? area) {
+    if (area == null || area.length < 3) return null;
+    final coords =
+        area.map((p) => NLatLng(p['lat'] ?? 0.0, p['lng'] ?? 0.0)).toList();
+    return NPolygonOverlay(
+      id: 'playable_area_sheet',
+      coords: coords,
+      color: const Color(0xFF2563EB).withValues(alpha: 0.1),
+      outlineColor: const Color(0xFF2563EB),
+      outlineWidth: 2,
+    );
+  }
+
+  /// 기존 폴리곤을 지우고 새 폴리곤을 지도에 추가합니다.
+  /// build() 안에서 직접 호출하지 말고 addPostFrameCallback을 통해 호출하세요.
+  void _syncPlayableAreaOverlay() {
+    final ctrl = _mapController;
+    if (ctrl == null) return;
+    // 기존 폴리곤 제거 (없어도 무방 – 예외 무시)
+    try {
+      ctrl.deleteOverlay(const NOverlayInfo(
+        type: NOverlayType.polygonOverlay,
+        id: 'playable_area_sheet',
+      ));
+    } catch (_) {}
+    final polygon = _playableAreaPolygon;
+    if (polygon != null) ctrl.addOverlay(polygon);
+  }
 
   @override
   void initState() {
@@ -1260,11 +2006,32 @@ class _GameMapSheetState extends ConsumerState<_GameMapSheet> {
           mapState.hiddenMembers, mapState.eliminatedUserIds);
     }
 
+    final playableArea = gameState.playableArea;
+    if (!identical(_prevPlayableArea, playableArea)) {
+      _prevPlayableArea = playableArea;
+      _playableAreaPolygon = _buildPlayableAreaPolygon(playableArea);
+      if (!_polygonScheduled) {
+        _polygonScheduled = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _polygonScheduled = false;
+          if (mounted) _syncPlayableAreaOverlay();
+        });
+      }
+    }
+
     final canUseChaseAction = widget.sessionType == SessionType.chase &&
         !widget.isGhostMode &&
         !mapState.isEliminated &&
         mapState.proximateTargetId != null &&
         mapState.gameState.status == 'in_progress';
+    // verbal 모드 임포스터 킬
+    final isImpostor = gameState.myRole?.isImpostor == true;
+    final showVerbalKill = widget.sessionType == SessionType.verbal &&
+        isImpostor &&
+        !widget.isGhostMode &&
+        !mapState.isEliminated &&
+        mapState.gameState.status == 'in_progress';
+    final verbalKillHasTarget = mapState.proximateTargetId != null;
     final bottomPadding = MediaQuery.of(context).padding.bottom;
     final memberCount = mapState.members.length;
     final memberPanelReserve =
@@ -1300,6 +2067,7 @@ class _GameMapSheetState extends ConsumerState<_GameMapSheet> {
                         mapState.sharingEnabled,
                         mapState.hiddenMembers,
                         mapState.eliminatedUserIds);
+                    _syncPlayableAreaOverlay();
                   },
                   onCameraChange: (reason, _) {
                     if (reason == NCameraUpdateReason.gesture) {
@@ -1371,6 +2139,29 @@ class _GameMapSheetState extends ConsumerState<_GameMapSheet> {
                     child: Text(gameState.myRole!.isImpostor ? '임포스터' : '크루원',
                         style: const TextStyle(
                             color: Colors.white, fontWeight: FontWeight.w700)),
+                  ),
+                ),
+              if (showVerbalKill)
+                Positioned(
+                  left: 16,
+                  bottom: chaseButtonBottom,
+                  child: SafeArea(
+                    top: false,
+                    child: _VerbalKillMapButton(
+                      hasTarget: verbalKillHasTarget,
+                      onKill: verbalKillHasTarget
+                          ? () => ref
+                              .read(mapSessionProvider(widget.sessionId)
+                                  .notifier)
+                              .sendKillAction(mapState.proximateTargetId!)
+                          : () => ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text(
+                                      '근처에 대상이 없습니다. 상대방에게 더 가까이 이동하세요.'),
+                                  duration: Duration(seconds: 2),
+                                ),
+                              ),
+                    ),
                   ),
                 ),
               if (widget.sessionType == SessionType.chase)

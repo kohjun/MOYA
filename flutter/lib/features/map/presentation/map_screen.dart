@@ -653,6 +653,10 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   String? _prevMyUserId;
   Set<String>? _prevEliminatedUserIds;
 
+  // ── 플레이 영역 폴리곤 캐시 ───────────────────────────────────────────────
+  NPolygonOverlay? _cachedPlayableAreaPolygon;
+  List<Map<String, double>>? _prevPlayableArea;
+
   @override
   void initState() {
     super.initState();
@@ -672,6 +676,36 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           backgroundColor: Colors.red,
         ),
       );
+    }
+  }
+
+  // ── 플레이 영역 폴리곤 생성 ──────────────────────────────────────────────
+  NPolygonOverlay? _buildPlayableAreaPolygon(
+      List<Map<String, double>>? area) {
+    if (area == null || area.length < 3) return null;
+    final coords = area
+        .map((p) => NLatLng(p['lat'] ?? 0.0, p['lng'] ?? 0.0))
+        .toList();
+    return NPolygonOverlay(
+      id: 'playable_area',
+      coords: coords,
+      color: const Color(0xFF2563EB).withValues(alpha: 0.1),
+      outlineColor: const Color(0xFF2563EB),
+      outlineWidth: 2,
+    );
+  }
+
+  // ── 지도 오버레이 전체 동기화 (마커 + 플레이 영역) ─────────────────────
+  void _syncOverlays() {
+    final ctrl = _mapController;
+    if (ctrl == null) return;
+    ctrl.clearOverlays();
+    if (_cachedMarkers.isNotEmpty) {
+      ctrl.addOverlayAll(_cachedMarkers);
+    }
+    final polygon = _cachedPlayableAreaPolygon;
+    if (polygon != null) {
+      ctrl.addOverlay(polygon);
     }
   }
 
@@ -874,8 +908,11 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       )..setAnimation(animation: NCameraAnimation.easing));
     }
 
-    // 마커 캐시: 마커에 영향 주는 상태가 실제로 바뀐 경우에만 재계산
+    // 마커·폴리곤 캐시: 관련 상태가 실제로 바뀐 경우에만 재계산 후 지도에 반영
     final myUserId = authUser?.id;
+    final playableArea = amgState.playableArea;
+    bool overlaysNeedUpdate = false;
+
     if (!identical(_prevMembers, mapState.members) ||
         _prevSharingEnabled != mapState.sharingEnabled ||
         !identical(_prevHiddenMembers, mapState.hiddenMembers) ||
@@ -894,12 +931,17 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         mapState.hiddenMembers,
         mapState.eliminatedUserIds,
       );
+      overlaysNeedUpdate = true;
+    }
 
-      // 네이버 지도는 오버레이를 컨트롤러를 통해 직접 갱신해야 합니다.
-      if (_mapController != null) {
-        _mapController!.clearOverlays();
-        _mapController!.addOverlayAll(_cachedMarkers);
-      }
+    if (!identical(_prevPlayableArea, playableArea)) {
+      _prevPlayableArea = playableArea;
+      _cachedPlayableAreaPolygon = _buildPlayableAreaPolygon(playableArea);
+      overlaysNeedUpdate = true;
+    }
+
+    if (overlaysNeedUpdate) {
+      _syncOverlays();
     }
 
     return PopScope(
@@ -926,9 +968,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                 ),
                 onMapReady: (controller) {
                   _mapController = controller;
-                  if (_cachedMarkers.isNotEmpty) {
-                    _mapController!.addOverlayAll(_cachedMarkers);
-                  }
+                  _syncOverlays();
                 },
                 onCameraChange: (reason, animated) {
                   if (reason == NCameraUpdateReason.gesture) {
@@ -990,16 +1030,30 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               onKillAction: () => ref
                   .read(mapSessionProvider(widget.sessionId).notifier)
                   .sendKillAction(mapState.proximateTargetId!),
+              onVerbalKill: mapState.proximateTargetId != null
+                  ? () => ref
+                      .read(mapSessionProvider(widget.sessionId).notifier)
+                      .sendKillAction(mapState.proximateTargetId!)
+                  : null,
               onOpenVote: () => ref
-                  .read(mapSessionProvider(widget.sessionId).notifier)
-                  .openVote((result) {
+                  .read(gameProvider(widget.sessionId).notifier)
+                  .sendEmergency((result) {
                 if (result['ok'] == true) return;
-
-                final error = result['error']?.toString() ?? '투표를 시작하지 못했습니다.';
+                final error =
+                    result['error']?.toString() ?? '긴급호출에 실패했습니다.';
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(content: Text(error)),
                 );
               }),
+              onShowMission: activeModules.contains('vote')
+                  ? () => showModalBottomSheet<void>(
+                        context: context,
+                        isScrollControlled: true,
+                        backgroundColor: Colors.transparent,
+                        builder: (_) =>
+                            _MapMissionSheet(missions: amgState.missions),
+                      )
+                  : null,
               onCloseFinished: () {
                 final router = GoRouter.of(context);
                 if (router.canPop()) {
@@ -1592,6 +1646,162 @@ class _GameInfoChip extends StatelessWidget {
           fontSize: 13,
           fontWeight: FontWeight.w700,
         ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 미션 보기 시트 (verbal 모드 전용)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _MapMissionSheet extends StatelessWidget {
+  const _MapMissionSheet({required this.missions});
+
+  final List<am_game.GameMission> missions;
+
+  @override
+  Widget build(BuildContext context) {
+    final pending = missions.where((m) => !m.isCompleted).toList();
+    final done = missions.where((m) => m.isCompleted).toList();
+
+    return DraggableScrollableSheet(
+      initialChildSize: 0.55,
+      minChildSize: 0.35,
+      maxChildSize: 0.9,
+      expand: false,
+      builder: (_, controller) => Container(
+        decoration: const BoxDecoration(
+          color: Color(0xFF1A1A2E),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          children: [
+            const SizedBox(height: 12),
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.white24,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 16),
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 20),
+              child: Row(
+                children: [
+                  Icon(Icons.assignment_outlined,
+                      color: Colors.white70, size: 20),
+                  SizedBox(width: 8),
+                  Text(
+                    '내 미션',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+            Expanded(
+              child: missions.isEmpty
+                  ? const Center(
+                      child: Text(
+                        '배정된 미션이 없습니다.',
+                        style: TextStyle(color: Colors.white54, fontSize: 15),
+                      ),
+                    )
+                  : ListView(
+                      controller: controller,
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                      children: [
+                        if (pending.isNotEmpty) ...[
+                          const Padding(
+                            padding: EdgeInsets.only(bottom: 6),
+                            child: Text('미완료',
+                                style: TextStyle(
+                                    color: Colors.white54, fontSize: 12)),
+                          ),
+                          ...pending.map((m) => _MissionTile(mission: m)),
+                          const SizedBox(height: 12),
+                        ],
+                        if (done.isNotEmpty) ...[
+                          const Padding(
+                            padding: EdgeInsets.only(bottom: 6),
+                            child: Text('완료',
+                                style: TextStyle(
+                                    color: Colors.white54, fontSize: 12)),
+                          ),
+                          ...done.map((m) => _MissionTile(mission: m)),
+                        ],
+                      ],
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MissionTile extends StatelessWidget {
+  const _MissionTile({required this.mission});
+
+  final am_game.GameMission mission;
+
+  @override
+  Widget build(BuildContext context) {
+    final isDone = mission.isCompleted;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: isDone
+            ? Colors.green.withValues(alpha: 0.15)
+            : Colors.white.withValues(alpha: 0.07),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: isDone
+              ? Colors.green.withValues(alpha: 0.4)
+              : Colors.white12,
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            isDone ? Icons.check_circle_rounded : Icons.radio_button_unchecked,
+            color: isDone ? Colors.green : Colors.white38,
+            size: 20,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              mission.title.isEmpty ? mission.id : mission.title,
+              style: TextStyle(
+                color: isDone ? Colors.white54 : Colors.white,
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                decoration: isDone ? TextDecoration.lineThrough : null,
+              ),
+            ),
+          ),
+          if (mission.zone.isNotEmpty)
+            Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: Colors.white12,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                mission.zone,
+                style: const TextStyle(color: Colors.white60, fontSize: 11),
+              ),
+            ),
+        ],
       ),
     );
   }

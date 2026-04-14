@@ -18,6 +18,8 @@ class LobbyState {
   final Session? sessionInfo;
   final bool isLoading;
   final Map<String, dynamic>? gameStartPayload;
+  /// 현재 말하고 있는 userId 집합
+  final Set<String> speakingUserIds;
 
   const LobbyState({
     this.members = const [],
@@ -25,6 +27,7 @@ class LobbyState {
     this.sessionInfo,
     this.isLoading = true,
     this.gameStartPayload,
+    this.speakingUserIds = const {},
   });
 
   LobbyState copyWith({
@@ -33,6 +36,7 @@ class LobbyState {
     Session? sessionInfo,
     bool? isLoading,
     Map<String, dynamic>? gameStartPayload,
+    Set<String>? speakingUserIds,
   }) {
     return LobbyState(
       members: members ?? this.members,
@@ -40,6 +44,7 @@ class LobbyState {
       sessionInfo: sessionInfo ?? this.sessionInfo,
       isLoading: isLoading ?? this.isLoading,
       gameStartPayload: gameStartPayload ?? this.gameStartPayload,
+      speakingUserIds: speakingUserIds ?? this.speakingUserIds,
     );
   }
 }
@@ -64,6 +69,7 @@ class LobbyNotifier extends StateNotifier<LobbyState> {
   StreamSubscription? _kickedSub;
   StreamSubscription? _gameStartedSub;
   StreamSubscription? _connectionSub;
+  StreamSubscription? _voiceSpeakingSub;
 
   Future<void> _init() async {
     // 1. 소켓 연결
@@ -128,6 +134,20 @@ class LobbyNotifier extends StateNotifier<LobbyState> {
       if (connected) {
         _socket.joinSession(_sessionId);
       }
+    });
+
+    _voiceSpeakingSub = _socket.onVoiceSpeaking.listen((data) {
+      final userId = data['userId'] as String? ?? '';
+      final isSpeaking = data['isSpeaking'] as bool? ?? false;
+      if (userId.isEmpty) return;
+
+      final current = Set<String>.from(state.speakingUserIds);
+      if (isSpeaking) {
+        current.add(userId);
+      } else {
+        current.remove(userId);
+      }
+      state = state.copyWith(speakingUserIds: current);
     });
   }
 
@@ -205,6 +225,7 @@ class LobbyNotifier extends StateNotifier<LobbyState> {
     _kickedSub?.cancel();
     _gameStartedSub?.cancel();
     _connectionSub?.cancel();
+    _voiceSpeakingSub?.cancel();
     super.dispose();
   }
 }

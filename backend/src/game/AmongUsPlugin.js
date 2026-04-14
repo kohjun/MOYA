@@ -44,7 +44,7 @@ const AmongUsPlugin = {
   },
 
   getSystemPrompt(role, nickname) {
-    const base = `너는 어몽어스 오프라인 게임의 AI 진행자야. 플레이어 닉네임: ${nickname}`;
+    const base = `너는 어몽어스 오프라인 게임의 AI 진행자야. 플레이어 닉네임: ${nickname}\n답변은 반드시 완전한 문장으로 끝내고, 5문장을 넘지 마.`;
     if (role === 'impostor') {
       return base + '\n이 플레이어는 임포스터야. 전략적으로 조언하되 다른 플레이어에게 정체가 들키지 않도록 해.';
     }
@@ -52,10 +52,18 @@ const AmongUsPlugin = {
   },
 
   buildStateContext(gameState, player) {
+    // players가 Map이면 .size, 배열이면 .length, alivePlayerIds가 있으면 그걸 우선 사용
+    const aliveCount =
+      gameState.alivePlayerIds?.length ??
+      (gameState.players instanceof Map
+        ? gameState.players.size
+        : gameState.players?.length) ??
+      gameState.aliveMembers?.length ??
+      0;
     return [
-      `생존자 수: ${gameState.aliveMembers?.length ?? 0}명`,
+      `생존자 수: ${aliveCount}명`,
       `킬 로그: ${gameState.killLog?.length ?? 0}건`,
-      `내 역할: ${player.role}`,
+      `내 역할: ${player.roleId ?? player.role}`,
       `내 팀: ${player.team}`,
     ].join('\n');
   },

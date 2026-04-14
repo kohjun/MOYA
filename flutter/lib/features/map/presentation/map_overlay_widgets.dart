@@ -55,6 +55,8 @@ class MapOverlayLayer extends StatelessWidget {
     required this.onKillAction,
     required this.onOpenVote,
     required this.onCloseFinished,
+    this.onVerbalKill,
+    this.onShowMission,
     this.bottomActionOffset = 290,
     this.showTopStatus = true,
   });
@@ -65,6 +67,8 @@ class MapOverlayLayer extends StatelessWidget {
   final String? authUserId;
   final VoidCallback onKillAction;
   final VoidCallback onOpenVote;
+  final VoidCallback? onShowMission;
+  final VoidCallback? onVerbalKill;
   final VoidCallback onCloseFinished;
   final double bottomActionOffset;
   final bool showTopStatus;
@@ -80,10 +84,19 @@ class MapOverlayLayer extends StatelessWidget {
         mapState.proximateTargetId != null &&
         !mapState.isEliminated &&
         isInProgress;
+    // verbal 모드(round+vote)에서는 전원이 긴급호출 가능
     final canOpenVote = activeModules.contains('round') &&
         activeModules.contains('vote') &&
-        mapState.myRole == 'host' &&
+        !mapState.isEliminated &&
         isInProgress;
+    final isVerbalMode = activeModules.contains('vote') &&
+        activeModules.contains('round') &&
+        !activeModules.contains('proximity');
+    // verbal 모드 임포스터 킬 버튼
+    final isImpostor = amongUsState.myRole?.isImpostor == true;
+    final showVerbalKillButton =
+        isVerbalMode && isImpostor && !mapState.isEliminated && isInProgress;
+    final verbalKillHasTarget = mapState.proximateTargetId != null;
     final canShowMissionButton =
         activeModules.contains('mission') && isInProgress;
 
@@ -141,6 +154,56 @@ class MapOverlayLayer extends StatelessWidget {
                   : Colors.white,
             ),
           ),
+        // ── 미션 보기 버튼 (verbal 모드 전용, 좌상단) ─────────────────────────────
+        if (isVerbalMode && onShowMission != null && isInProgress)
+          Positioned(
+            top: MediaQuery.of(context).padding.top + 78,
+            left: 16,
+            child: GestureDetector(
+              onTap: onShowMission,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0F766E).withValues(alpha: 0.92),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.assignment_outlined,
+                        color: Colors.white, size: 15),
+                    SizedBox(width: 5),
+                    Text(
+                      '미션 보기',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        // ── verbal 모드 임포스터 킬 버튼 (좌하단) ──────────────────────────
+        if (showVerbalKillButton)
+          Positioned(
+            left: 16,
+            bottom: bottomActionOffset,
+            child: _VerbalKillButton(
+              hasTarget: verbalKillHasTarget,
+              onPressed: verbalKillHasTarget
+                  ? onVerbalKill
+                  : () => ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('근처에 대상이 없습니다. 상대방에게 더 가까이 이동하세요.'),
+                          duration: Duration(seconds: 2),
+                        ),
+                      ),
+            ),
+          ),
         if (canUseKill)
           Positioned(
             left: 16,
@@ -181,9 +244,9 @@ class MapOverlayLayer extends StatelessWidget {
                 ),
                 if (canOpenVote) ...[
                   const SizedBox(height: 8),
-                  ElevatedButton(
+                  ElevatedButton.icon(
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF7C3AED),
+                      backgroundColor: const Color(0xFFB45309),
                       foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(
                         horizontal: 18,
@@ -195,7 +258,8 @@ class MapOverlayLayer extends StatelessWidget {
                       ),
                     ),
                     onPressed: onOpenVote,
-                    child: const Text('투표 시작'),
+                    icon: const Icon(Icons.warning_amber_rounded, size: 18),
+                    label: const Text('긴급호출'),
                   ),
                 ],
               ],
@@ -333,6 +397,59 @@ class MapOverlayLayer extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+class _VerbalKillButton extends StatelessWidget {
+  const _VerbalKillButton({
+    required this.hasTarget,
+    required this.onPressed,
+  });
+
+  final bool hasTarget;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onPressed,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+        decoration: BoxDecoration(
+          color: hasTarget ? Colors.red : Colors.grey.shade700,
+          borderRadius: BorderRadius.circular(18),
+          boxShadow: hasTarget
+              ? [
+                  BoxShadow(
+                    color: Colors.red.withValues(alpha: 0.45),
+                    blurRadius: 12,
+                    offset: const Offset(0, 4),
+                  )
+                ]
+              : [],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              hasTarget ? Icons.dangerous_rounded : Icons.dangerous_outlined,
+              color: Colors.white,
+              size: 22,
+            ),
+            const SizedBox(width: 8),
+            Text(
+              hasTarget ? '제거' : '범위 밖',
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 16,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

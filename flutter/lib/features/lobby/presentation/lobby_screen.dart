@@ -13,6 +13,7 @@ import 'package:share_plus/share_plus.dart';
 import '../../../core/services/mediasoup_audio_service.dart';
 import '../../../core/services/socket_service.dart';
 import '../../auth/data/auth_repository.dart';
+import '../../game/presentation/playable_area_painter_screen.dart';
 import '../../home/data/session_repository.dart';
 import '../providers/lobby_provider.dart';
 
@@ -162,6 +163,7 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
                         myUserId: myUserId,
                         isHost: isHost,
                         sessionId: widget.sessionId,
+                        speakingUserIds: lobbyState.speakingUserIds,
                       ),
                       const SizedBox(height: 24),
                       if (!lobbyState.isGameStarted) ...[
@@ -169,6 +171,37 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
                         const SizedBox(height: 20),
                       ],
                       if (isHost) ...[
+                        // ── 플레이 영역 설정 버튼 ────────────────────────────
+                        OutlinedButton.icon(
+                          onPressed: () async {
+                            final result = await Navigator.push<dynamic>(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => PlayableAreaPainterScreen(
+                                  sessionId: widget.sessionId,
+                                ),
+                              ),
+                            );
+                            if (result != null && mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('플레이 영역이 설정되었습니다.'),
+                                  backgroundColor: Colors.green,
+                                  duration: Duration(seconds: 2),
+                                ),
+                              );
+                            }
+                          },
+                          icon: const Icon(Icons.map_outlined),
+                          label: const Text('플레이 영역 설정'),
+                          style: OutlinedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
                         if (!canStart)
                           Padding(
                             padding: const EdgeInsets.only(bottom: 8),
@@ -457,12 +490,14 @@ class _ParticipantListSection extends ConsumerWidget {
     required this.myUserId,
     required this.isHost,
     required this.sessionId,
+    required this.speakingUserIds,
   });
 
   final List<SessionMember> members;
   final String myUserId;
   final bool isHost;
   final String sessionId;
+  final Set<String> speakingUserIds;
 
   Color _badgeColor(String role) {
     switch (role) {
@@ -499,6 +534,8 @@ class _ParticipantListSection extends ConsumerWidget {
         ...members.map((member) {
           final isMe = member.userId == myUserId;
           final canManage = isHost && !member.isHost;
+          final isSpeaking = speakingUserIds.contains(member.userId) ||
+              (isMe && MediaSoupAudioService().isSpeaking);
 
           return Card(
             margin: const EdgeInsets.only(bottom: 8),
@@ -508,14 +545,7 @@ class _ParticipantListSection extends ConsumerWidget {
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               child: Row(
                 children: [
-                  Container(
-                    width: 10,
-                    height: 10,
-                    decoration: const BoxDecoration(
-                      color: Colors.green,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
+                  _SpeakingDot(isSpeaking: isSpeaking),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
@@ -790,7 +820,192 @@ class _AudioCheckSectionState extends State<_AudioCheckSection> {
                 ),
               ],
             ),
+            // ── 점검 완료 후: 마이크 컨트롤 영역 ─────────────────────────
+            if (_phase == _CheckPhase.done) ...[
+              const SizedBox(height: 14),
+              const Divider(height: 1),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  // 마이크 음소거 토글
+                  _MicToggleButton(sessionId: widget.sessionId),
+                  const SizedBox(width: 16),
+                  // 로컬 speaking 인디케이터
+                  StreamBuilder<bool>(
+                    stream: MediaSoupAudioService().isSpeakingStream,
+                    initialData: false,
+                    builder: (context, snap) {
+                      final speaking = snap.data ?? false;
+                      return AnimatedContainer(
+                        duration: const Duration(milliseconds: 150),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color: speaking
+                              ? Colors.green.withValues(alpha: 0.12)
+                              : Colors.grey.withValues(alpha: 0.08),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: speaking
+                                ? Colors.green.shade400
+                                : Colors.grey.shade300,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              speaking
+                                  ? Icons.mic_rounded
+                                  : Icons.mic_none_rounded,
+                              size: 16,
+                              color: speaking
+                                  ? Colors.green.shade700
+                                  : Colors.grey.shade500,
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              speaking ? '말하는 중...' : '대기 중',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: speaking
+                                    ? Colors.green.shade700
+                                    : Colors.grey.shade600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ],
           ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── 말하는 중 점 인디케이터 ──────────────────────────────────────────────────
+class _SpeakingDot extends StatefulWidget {
+  const _SpeakingDot({required this.isSpeaking});
+  final bool isSpeaking;
+
+  @override
+  State<_SpeakingDot> createState() => _SpeakingDotState();
+}
+
+class _SpeakingDotState extends State<_SpeakingDot>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+  late final Animation<double> _scale;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 600),
+    )..repeat(reverse: true);
+    _scale = Tween<double>(begin: 0.7, end: 1.0).animate(
+      CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!widget.isSpeaking) {
+      return Container(
+        width: 10,
+        height: 10,
+        decoration: const BoxDecoration(
+          color: Colors.green,
+          shape: BoxShape.circle,
+        ),
+      );
+    }
+
+    return ScaleTransition(
+      scale: _scale,
+      child: Container(
+        width: 14,
+        height: 14,
+        decoration: BoxDecoration(
+          color: Colors.green.shade500,
+          shape: BoxShape.circle,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.green.withValues(alpha: 0.5),
+              blurRadius: 6,
+              spreadRadius: 2,
+            ),
+          ],
+        ),
+        child: const Icon(Icons.mic_rounded, size: 9, color: Colors.white),
+      ),
+    );
+  }
+}
+
+// ── 마이크 음소거 토글 버튼 ────────────────────────────────────────────────
+class _MicToggleButton extends StatefulWidget {
+  const _MicToggleButton({required this.sessionId});
+  final String sessionId;
+
+  @override
+  State<_MicToggleButton> createState() => _MicToggleButtonState();
+}
+
+class _MicToggleButtonState extends State<_MicToggleButton> {
+  bool _isMuted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _isMuted = MediaSoupAudioService().isMuted;
+  }
+
+  Future<void> _toggle() async {
+    await MediaSoupAudioService().toggleMute();
+    if (!mounted) return;
+    setState(() {
+      _isMuted = MediaSoupAudioService().isMuted;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: _toggle,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        width: 52,
+        height: 52,
+        decoration: BoxDecoration(
+          color: _isMuted
+              ? Colors.red.withValues(alpha: 0.1)
+              : Colors.green.withValues(alpha: 0.1),
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: _isMuted ? Colors.red.shade400 : Colors.green.shade400,
+            width: 2,
+          ),
+        ),
+        child: Icon(
+          _isMuted ? Icons.mic_off_rounded : Icons.mic_rounded,
+          color: _isMuted ? Colors.red.shade600 : Colors.green.shade600,
+          size: 26,
         ),
       ),
     );

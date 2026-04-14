@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:wakelock_plus/wakelock_plus.dart'; // Task 2: 화면 꺼짐 방지
 
 import '../../../core/services/socket_service.dart';
@@ -24,6 +26,63 @@ class GameNotifier extends StateNotifier<AmongUsGameState> {
   final _socket = SocketService();
   final List<StreamSubscription> _subs = [];
   int _logIdCounter = 0;
+
+  // ── [Stage 4] 위치 기반 미션 활성화 ─────────────────────────────────────────
+  StreamSubscription<Position>? _missionLocationSub;
+
+  /// 미션 활성화 반경 (미터). 이 안에 들어와야 수행하기 버튼이 켜집니다.
+  static const double kActivationRadius = 15.0;
+
+  /// Haversine 공식으로 두 GPS 좌표 사이의 거리(미터)를 반환합니다.
+  static double _haversineMeters(
+      double lat1, double lng1, double lat2, double lng2) {
+    const r = 6371000.0; // 지구 반지름 (m)
+    final dLat = _rad(lat2 - lat1);
+    final dLng = _rad(lng2 - lng1);
+    final a = math.sin(dLat / 2) * math.sin(dLat / 2) +
+        math.cos(_rad(lat1)) *
+            math.cos(_rad(lat2)) *
+            math.sin(dLng / 2) *
+            math.sin(dLng / 2);
+    return r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
+  }
+
+  static double _rad(double deg) => deg * math.pi / 180;
+
+  /// 현재 위치를 기준으로 반경 내 미션 ID 목록을 갱신합니다.
+  void _onLocationForMissions(Position pos) {
+    final candidates = state.missions
+        .where((m) => m.hasLocation && !m.isCompleted && !m.isFake)
+        .toList();
+
+    if (candidates.isEmpty) return;
+
+    final nearby = candidates
+        .where((m) => _haversineMeters(
+              pos.latitude, pos.longitude, m.lat!, m.lng!) <= kActivationRadius)
+        .map((m) => m.id)
+        .toList();
+
+    // 변경이 없으면 불필요한 리빌드 방지
+    final current = state.nearbyMissionIds;
+    final changed = nearby.length != current.length ||
+        nearby.any((id) => !current.contains(id));
+    if (!changed) return;
+
+    state = state.copyWith(nearbyMissionIds: nearby);
+  }
+
+  /// GPS 구독을 시작합니다. 이미 실행 중이면 무시합니다.
+  void _startMissionLocationTracking() {
+    if (_missionLocationSub != null) return;
+    _missionLocationSub = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 3, // 3m 이상 이동 시에만 재판정
+      ),
+    ).listen(_onLocationForMissions, onError: (_) {});
+  }
+  // ─────────────────────────────────────────────────────────────────────────────
 
   String _nextLogId() =>
       '${DateTime.now().millisecondsSinceEpoch}_${_logIdCounter++}';
@@ -198,6 +257,11 @@ class GameNotifier extends StateNotifier<AmongUsGameState> {
             'percent': percent,
           },
         );
+
+        // [Stage 4] 좌표가 있는 미션이 수신되면 GPS 추적 자동 시작
+        final hasLocatedMission =
+            updatedMissions.any((m) => m.hasLocation && !m.isCompleted);
+        if (hasLocatedMission) _startMissionLocationTracking();
       }),
     );
 
@@ -230,6 +294,16 @@ class GameNotifier extends StateNotifier<AmongUsGameState> {
 
   void completeMission(String missionId) =>
       _socket.sendMissionComplete(_sessionId, missionId);
+
+  /// 호스트가 설정한 플레이 가능 영역 폴리곤을 상태에 저장합니다.
+  /// null을 전달하면 이탈 경고 판정이 비활성화됩니다.
+  /// 유효한 폴리곤이 전달되면 위치 기반 미션 활성화 GPS 추적도 함께 시작합니다.
+  void setPlayableArea(List<Map<String, double>>? area) {
+    state = state.copyWith(playableArea: area);
+    if (area != null && area.length >= 3) {
+      _startMissionLocationTracking();
+    }
+  }
 
   void resetRoleNavigation() {
     state = state.copyWith(shouldNavigateToRole: false);
@@ -264,6 +338,7 @@ class GameNotifier extends StateNotifier<AmongUsGameState> {
     for (final sub in _subs) {
       sub.cancel();
     }
+    _missionLocationSub?.cancel(); // [Stage 4] 미션 GPS 구독 해제
     super.dispose();
   }
 }

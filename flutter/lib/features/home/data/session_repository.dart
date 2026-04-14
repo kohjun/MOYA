@@ -69,6 +69,9 @@ class Session {
   final int killCooldown;
   /// 긴급 회의 쿨타임 (초). 서버 discussion_time 컬럼 → 기본 90초.
   final int emergencyCooldown;
+  /// 호스트가 설정한 플레이 가능 영역 폴리곤 좌표 목록.
+  /// 서버에서 playable_area JSONB 컬럼으로 저장됩니다.
+  final List<Map<String, double>>? playableArea;
 
   const Session({
     required this.id,
@@ -84,6 +87,7 @@ class Session {
     this.gameStatus = 'lobby',
     this.killCooldown = 30,
     this.emergencyCooldown = 90,
+    this.playableArea,
   });
 
   SessionType get sessionType => SessionType.fromModules(activeModules);
@@ -110,6 +114,16 @@ class Session {
         ?? (rawConfigs['discussionTime'] as num?)?.toInt()
         ?? 90;
 
+    // playable_area: [{lat, lng}, ...] 형태의 JSONB 배열 파싱
+    final rawArea = m['playable_area'] as List<dynamic>?;
+    final playableArea = rawArea
+        ?.whereType<Map<String, dynamic>>()
+        .map((p) => {
+              'lat': (p['lat'] as num).toDouble(),
+              'lng': (p['lng'] as num).toDouble(),
+            })
+        .toList();
+
     return Session(
       id: m['id'] as String,
       name: m['name'] as String,
@@ -129,6 +143,7 @@ class Session {
       gameStatus: m['game_status'] as String? ?? 'lobby',
       killCooldown: killCd,
       emergencyCooldown: emergencyCd,
+      playableArea: playableArea,
     );
   }
 }
@@ -227,6 +242,30 @@ class SessionRepository {
         expiresAt: null,
       );
     }
+  }
+
+  /// 호스트가 플레이 가능 영역 폴리곤을 서버에 저장합니다.
+  /// [points] 는 최소 3개의 좌표 목록 (lat, lng).
+  Future<List<Map<String, double>>> setPlayableArea(
+    String sessionId,
+    List<Map<String, double>> points,
+  ) async {
+    final res = await _api.patch(
+      '/sessions/$sessionId/playable-area',
+      data: {
+        'polygonPoints': points
+            .map((p) => {'lat': p['lat'], 'lng': p['lng']})
+            .toList(),
+      },
+    );
+    final raw = res.data['playableArea'] as List<dynamic>? ?? [];
+    return raw
+        .whereType<Map<String, dynamic>>()
+        .map((p) => {
+              'lat': (p['lat'] as num).toDouble(),
+              'lng': (p['lng'] as num).toDouble(),
+            })
+        .toList();
   }
 
   Future<void> leaveSession(String id) async {

@@ -332,7 +332,8 @@ export const getSession = async (sessionId) => {
   const { rows } = await query(
     `SELECT id, host_user_id, session_code, name, status,
             created_at, expires_at, ended_at, active_modules, module_configs, max_members,
-            game_type, impostor_count, kill_cooldown, discussion_time, vote_time, mission_per_crew
+            game_type, impostor_count, kill_cooldown, discussion_time, vote_time, mission_per_crew,
+            playable_area
      FROM sessions
      WHERE id = $1`,
     [sessionId]
@@ -340,5 +341,28 @@ export const getSession = async (sessionId) => {
   if (rows.length === 0) return null;
 
   await setCache(`session:${sessionId}`, rows[0], 86400);
+  return rows[0];
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 플레이 가능 영역(폴리곤) 저장 (호스트만 가능)
+// polygonPoints: [{lat: number, lng: number}, ...]  최소 3개
+// ─────────────────────────────────────────────────────────────────────────────
+export const setPlayableArea = async (hostUserId, sessionId, polygonPoints) => {
+  if (!Array.isArray(polygonPoints) || polygonPoints.length < 3) {
+    throw new Error('INVALID_POLYGON');
+  }
+
+  const { rows } = await query(
+    `UPDATE sessions
+     SET playable_area = $1::jsonb
+     WHERE id = $2 AND host_user_id = $3
+     RETURNING id, playable_area`,
+    [JSON.stringify(polygonPoints), sessionId, hostUserId]
+  );
+  if (rows.length === 0) throw new Error('SESSION_NOT_FOUND_OR_NOT_HOST');
+
+  // 세션 캐시 무효화 (다음 getSession 호출 시 DB에서 재조회)
+  await delCache(`session:${sessionId}`);
   return rows[0];
 };
