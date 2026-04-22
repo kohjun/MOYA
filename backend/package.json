@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "nodemon --experimental-vm-modules src/server.js",
     "start": "node src/server.js",
-    "migrate": "node src/config/migrate.js"
+    "migrate": "node src/config/migrate.js",
+    "test": "node --test --test-isolation=none"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",

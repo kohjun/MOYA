@@ -1,12 +1,5 @@
-// lib/features/game/presentation/playable_area_painter_screen.dart
-//
-// 호스트가 NaverMap 위에서 터치로 폴리곤(플레이 가능 영역)을 그리고
-// 서버에 저장하는 화면입니다.
-//
-// 사용법 (로비 화면에서 호출):
-//   await Navigator.push(context, MaterialPageRoute(
-//     builder: (_) => PlayableAreaPainterScreen(sessionId: widget.sessionId),
-//   ));
+import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_naver_map/flutter_naver_map.dart';
@@ -14,6 +7,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
 
 import '../../home/data/session_repository.dart';
+
+enum _LayoutStep {
+  area,
+  controlPoints,
+  spawns,
+}
 
 class PlayableAreaPainterScreen extends ConsumerStatefulWidget {
   const PlayableAreaPainterScreen({super.key, required this.sessionId});
@@ -27,17 +26,37 @@ class PlayableAreaPainterScreen extends ConsumerStatefulWidget {
 
 class _PlayableAreaPainterScreenState
     extends ConsumerState<PlayableAreaPainterScreen> {
-  NaverMapController? _mapController;
-  final List<NLatLng> _vertices = [];
-  bool _isSaving = false;
+  static const _defaultControlPointCount = 5;
+  static const _spawnRadiusMeters = 18.0;
 
-  // 지도 초기 위치: 현재 GPS 위치 → 실패 시 서울 시청
+  NaverMapController? _mapController;
+  Session? _session;
+  bool _isLoading = true;
+  bool _isSaving = false;
   NLatLng _initialPosition = const NLatLng(37.5665, 126.9780);
+
+  final List<NLatLng> _areaVertices = [];
+  final List<NLatLng> _controlPoints = [];
+  final Map<String, NLatLng> _spawnCenters = {};
+
+  _LayoutStep _step = _LayoutStep.area;
+  String? _selectedTeamId;
 
   @override
   void initState() {
     super.initState();
-    _loadCurrentPosition();
+    _bootstrap();
+  }
+
+  Future<void> _bootstrap() async {
+    await Future.wait([
+      _loadCurrentPosition(),
+      _loadSession(),
+    ]);
+    if (mounted) {
+      setState(() => _isLoading = false);
+      unawaited(_refreshOverlays());
+    }
   }
 
   Future<void> _loadCurrentPosition() async {
@@ -45,332 +64,650 @@ class _PlayableAreaPainterScreenState
       final pos = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
       );
-      if (!mounted) return;
-      setState(() {
-        _initialPosition = NLatLng(pos.latitude, pos.longitude);
-      });
-      _mapController?.updateCamera(
-        NCameraUpdate.fromCameraPosition(
-          NCameraPosition(target: _initialPosition, zoom: 17),
-        ),
-      );
+      _initialPosition = NLatLng(pos.latitude, pos.longitude);
     } catch (_) {
-      // GPS 실패 → 기본 위치 유지
+      // Keep default center.
     }
   }
 
-  // ── 폴리곤 오버레이 갱신 ───────────────────────────────────────────────────
+  Future<void> _loadSession() async {
+    final session =
+        await ref.read(sessionRepositoryProvider).getSession(widget.sessionId);
+
+    final rawArea = session.playableArea ?? const [];
+    final area = rawArea
+        .map((point) => NLatLng(point['lat']!, point['lng']!))
+        .toList();
+
+    if (area.length >= 2 && area.first == area.last) {
+      area.removeLast();
+    }
+
+    _session = session;
+    _areaVertices
+      ..clear()
+      ..addAll(area);
+    _controlPoints
+      ..clear()
+      ..addAll(
+        session.fantasyWarsControlPoints
+            .map((point) => NLatLng(point['lat']!, point['lng']!)),
+      );
+    _spawnCenters
+      ..clear()
+      ..addEntries(session.fantasyWarsSpawnZones.map((zone) {
+        return MapEntry(zone.teamId, _polygonCenter(zone.polygonPoints));
+      }));
+
+    final firstTeam = _teams.isNotEmpty ? _teams.first.teamId : null;
+    _selectedTeamId = firstTeam;
+  }
+
+  List<FantasyWarsTeamConfig> get _teams {
+    final sessionTeams = _session?.fantasyWarsTeams ?? const [];
+    if (sessionTeams.isNotEmpty) {
+      return sessionTeams;
+    }
+
+    return const [
+      FantasyWarsTeamConfig(
+        teamId: 'guild_alpha',
+        displayName: '붉은 팀',
+        color: '#DC2626',
+      ),
+      FantasyWarsTeamConfig(
+        teamId: 'guild_beta',
+        displayName: '푸른 팀',
+        color: '#2563EB',
+      ),
+      FantasyWarsTeamConfig(
+        teamId: 'guild_gamma',
+        displayName: '초록 팀',
+        color: '#16A34A',
+      ),
+    ];
+  }
+
+  bool get _isFantasyWars =>
+      (_session?.gameType ?? 'among_us') == 'fantasy_wars_artifact';
+
+  int get _controlPointCount =>
+      (_session?.gameConfig['controlPointCount'] as num?)?.toInt() ??
+      _defaultControlPointCount;
 
   Future<void> _refreshOverlays() async {
-    final ctrl = _mapController;
-    if (ctrl == null) return;
-    if (!mounted) return;
+    final controller = _mapController;
+    if (controller == null || !mounted) return;
 
-    // 기존 오버레이 전체 제거
-    await ctrl.clearOverlays();
+    await controller.clearOverlays();
 
-    if (_vertices.isEmpty) return;
+    await _drawAreaOverlays(controller);
+    await _drawControlPoints(controller);
+    await _drawSpawnZones(controller);
+  }
 
-    // 꼭짓점 마커 (NOverlayImage.fromWidget은 Future를 반환하므로 await 필요)
-    for (int i = 0; i < _vertices.length; i++) {
-      if (!mounted) return;
+  Future<void> _drawAreaOverlays(NaverMapController controller) async {
+    if (_areaVertices.isEmpty) return;
+
+    for (var index = 0; index < _areaVertices.length; index += 1) {
+      final currentContext = context;
+      if (!currentContext.mounted) return;
       final icon = await NOverlayImage.fromWidget(
-        widget: _VertexDot(index: i + 1),
-        size: const Size(28, 28),
-        context: context,
+        widget: _NumberDot(
+          label: '${index + 1}',
+          color: const Color(0xFF1D4ED8),
+        ),
+        size: const Size(30, 30),
+        context: currentContext,
       );
-      if (!mounted) return;
-      final marker = NMarker(
-        id: 'v_$i',
-        position: _vertices[i],
-        icon: icon,
+      await controller.addOverlay(
+        NMarker(
+          id: 'area_vertex_$index',
+          position: _areaVertices[index],
+          icon: icon,
+        ),
       );
-      await ctrl.addOverlay(marker);
     }
 
-    // 폴리곤이 3개 이상이면 채워진 폴리곤 표시
-    if (_vertices.length >= 3) {
-      final polygon = NPolygonOverlay(
-        id: 'play_area',
-        coords: _vertices,
-        color: Colors.blue.withValues(alpha: 0.15),
-        outlineColor: Colors.blue,
-        outlineWidth: 2,
+    if (_areaVertices.length >= 3) {
+      final coords = List<NLatLng>.from(_areaVertices);
+      coords.add(_areaVertices.first);
+      await controller.addOverlay(
+        NPolygonOverlay(
+          id: 'play_area',
+          coords: coords,
+          color: const Color(0xFF1D4ED8).withValues(alpha: 0.12),
+          outlineColor: const Color(0xFF1D4ED8),
+          outlineWidth: 3,
+        ),
       );
-      await ctrl.addOverlay(polygon);
-    } else if (_vertices.length >= 2) {
-      // 꼭짓점이 2개면 선만 표시
-      final polyline = NPolylineOverlay(
-        id: 'play_line',
-        coords: _vertices,
-        color: Colors.blue,
-        width: 2,
+    } else if (_areaVertices.length >= 2) {
+      await controller.addOverlay(
+        NPolylineOverlay(
+          id: 'play_area_line',
+          coords: _areaVertices,
+          color: const Color(0xFF1D4ED8),
+          width: 3,
+        ),
       );
-      await ctrl.addOverlay(polyline);
     }
   }
 
-  // ── 지도 탭 핸들러 ─────────────────────────────────────────────────────────
+  Future<void> _drawControlPoints(NaverMapController controller) async {
+    for (var index = 0; index < _controlPoints.length; index += 1) {
+      final currentContext = context;
+      if (!currentContext.mounted) return;
+      final icon = await NOverlayImage.fromWidget(
+        widget: _NumberDot(
+          label: 'CP${index + 1}',
+          color: const Color(0xFFF59E0B),
+        ),
+        size: const Size(42, 42),
+        context: currentContext,
+      );
+      await controller.addOverlay(
+        NMarker(
+          id: 'control_point_$index',
+          position: _controlPoints[index],
+          icon: icon,
+        ),
+      );
+    }
+  }
+
+  Future<void> _drawSpawnZones(NaverMapController controller) async {
+    for (final team in _teams) {
+      final center = _spawnCenters[team.teamId];
+      if (center == null) continue;
+
+      final color = _hexToColor(team.color);
+      await controller.addOverlay(
+        NCircleOverlay(
+          id: 'spawn_${team.teamId}',
+          center: center,
+          radius: _spawnRadiusMeters,
+          color: color.withValues(alpha: 0.12),
+          outlineColor: color,
+          outlineWidth: 3,
+        ),
+      );
+
+      final currentContext = context;
+      if (!currentContext.mounted) return;
+      final icon = await NOverlayImage.fromWidget(
+        widget: _SpawnBadge(
+          label: team.displayName,
+          color: color,
+          selected: _selectedTeamId == team.teamId,
+        ),
+        size: const Size(96, 44),
+        context: currentContext,
+      );
+
+      await controller.addOverlay(
+        NMarker(
+          id: 'spawn_marker_${team.teamId}',
+          position: center,
+          icon: icon,
+        ),
+      );
+    }
+  }
 
   void _onMapTapped(NPoint point, NLatLng latLng) {
+    if (_isSaving || _isLoading) return;
+
+    setState(() {
+      switch (_step) {
+        case _LayoutStep.area:
+          _areaVertices.add(latLng);
+          break;
+        case _LayoutStep.controlPoints:
+          if (_controlPoints.length < _controlPointCount) {
+            _controlPoints.add(latLng);
+          }
+          break;
+        case _LayoutStep.spawns:
+          final targetTeamId =
+              _selectedTeamId ?? (_teams.isNotEmpty ? _teams.first.teamId : null);
+          if (targetTeamId == null) return;
+          _spawnCenters[targetTeamId] = latLng;
+          _selectedTeamId = _nextUnplacedTeamId() ?? targetTeamId;
+          break;
+      }
+    });
+
+    unawaited(_refreshOverlays());
+  }
+
+  void _undo() {
     if (_isSaving) return;
-    setState(() => _vertices.add(latLng));
-    _refreshOverlays();
+
+    setState(() {
+      switch (_step) {
+        case _LayoutStep.area:
+          if (_areaVertices.isNotEmpty) {
+            _areaVertices.removeLast();
+          }
+          break;
+        case _LayoutStep.controlPoints:
+          if (_controlPoints.isNotEmpty) {
+            _controlPoints.removeLast();
+          }
+          break;
+        case _LayoutStep.spawns:
+          final teamId = _selectedTeamId;
+          if (teamId != null) {
+            _spawnCenters.remove(teamId);
+          }
+          break;
+      }
+    });
+
+    unawaited(_refreshOverlays());
   }
 
-  // ── 마지막 꼭짓점 제거 ─────────────────────────────────────────────────────
-
-  void _undoLastVertex() {
-    if (_vertices.isEmpty || _isSaving) return;
-    setState(() => _vertices.removeLast());
-    _refreshOverlays();
-  }
-
-  // ── 전체 초기화 ────────────────────────────────────────────────────────────
-
-  void _clearAll() {
+  void _clearCurrentStep() {
     if (_isSaving) return;
-    setState(() => _vertices.clear());
-    _mapController?.clearOverlays();
-  }
 
-  // ── 내 위치로 이동 ─────────────────────────────────────────────────────────
+    setState(() {
+      switch (_step) {
+        case _LayoutStep.area:
+          _areaVertices.clear();
+          break;
+        case _LayoutStep.controlPoints:
+          _controlPoints.clear();
+          break;
+        case _LayoutStep.spawns:
+          _spawnCenters.clear();
+          _selectedTeamId = _teams.isNotEmpty ? _teams.first.teamId : null;
+          break;
+      }
+    });
+
+    unawaited(_refreshOverlays());
+  }
 
   Future<void> _moveToCurrentPosition() async {
     try {
       final pos = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
       );
-      _mapController?.updateCamera(
+      final target = NLatLng(pos.latitude, pos.longitude);
+      await _mapController?.updateCamera(
         NCameraUpdate.fromCameraPosition(
-          NCameraPosition(
-            target: NLatLng(pos.latitude, pos.longitude),
-            zoom: 17,
-          ),
+          NCameraPosition(target: target, zoom: 17),
         ),
       );
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('현재 위치를 가져올 수 없습니다.')),
+        const SnackBar(content: Text('현재 위치를 가져오지 못했습니다.')),
       );
     }
   }
 
-  // ── 서버 저장 ──────────────────────────────────────────────────────────────
-
   Future<void> _save() async {
-    if (_vertices.length < 3) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('플레이 영역은 최소 3개의 꼭짓점이 필요합니다.')),
-      );
+    if (_areaVertices.length < 3) {
+      _showMessage('플레이 구역 꼭짓점을 최소 3개 이상 찍어주세요.');
+      return;
+    }
+
+    if (_isFantasyWars && _controlPoints.length != _controlPointCount) {
+      _showMessage('점령지 $_controlPointCount개를 배치해주세요.');
+      return;
+    }
+
+    if (_isFantasyWars && _spawnCenters.length != _teams.length) {
+      _showMessage('모든 팀의 시작 지점을 배치해주세요.');
       return;
     }
 
     setState(() => _isSaving = true);
-
-    final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
 
     try {
-      final points = _vertices
-          .map((v) => {'lat': v.latitude, 'lng': v.longitude})
-          .toList();
+      if (_isFantasyWars) {
+        final session = await ref.read(sessionRepositoryProvider).setFantasyWarsLayout(
+              widget.sessionId,
+              playableArea: _areaVertices
+                  .map((point) => {
+                        'lat': point.latitude,
+                        'lng': point.longitude,
+                      })
+                  .toList(),
+              controlPoints: _controlPoints
+                  .map((point) => {
+                        'lat': point.latitude,
+                        'lng': point.longitude,
+                      })
+                  .toList(),
+              spawnZones: _teams.map((team) {
+                final center = _spawnCenters[team.teamId]!;
+                return {
+                  'teamId': team.teamId,
+                  'polygonPoints': _buildSpawnPolygon(center),
+                };
+              }).toList(),
+            );
 
-      await ref
-          .read(sessionRepositoryProvider)
-          .setPlayableArea(widget.sessionId, points);
+        if (!mounted) return;
+        navigator.pop(session);
+        return;
+      }
 
+      final saved = await ref.read(sessionRepositoryProvider).setPlayableArea(
+            widget.sessionId,
+            _areaVertices
+                .map((point) => {
+                      'lat': point.latitude,
+                      'lng': point.longitude,
+                    })
+                .toList(),
+          );
       if (!mounted) return;
-      messenger.showSnackBar(
-        const SnackBar(
-          content: Text('플레이 영역이 저장되었습니다.'),
-          backgroundColor: Colors.green,
-        ),
-      );
-      navigator.pop(points); // 저장된 좌표를 호출자에게 반환
+      navigator.pop(saved);
     } catch (e) {
-      if (!mounted) return;
-      messenger.showSnackBar(
-        SnackBar(content: Text('저장 실패: $e')),
-      );
+      _showMessage('저장 실패: $e');
     } finally {
-      if (mounted) setState(() => _isSaving = false);
+      if (mounted) {
+        setState(() => _isSaving = false);
+      }
     }
   }
 
-  // ── 빌드 ───────────────────────────────────────────────────────────────────
+  List<Map<String, double>> _buildSpawnPolygon(NLatLng center) {
+    final points = <Map<String, double>>[];
+    for (var index = 0; index < 6; index += 1) {
+      final angle = (math.pi * 2 * index) / 6;
+      final latOffset =
+          (_spawnRadiusMeters / 111320.0) * math.sin(angle);
+      final lngOffset =
+          (_spawnRadiusMeters /
+                  (111320.0 * math.cos(center.latitude * math.pi / 180))) *
+              math.cos(angle);
+
+      points.add({
+        'lat': center.latitude + latOffset,
+        'lng': center.longitude + lngOffset,
+      });
+    }
+    return points;
+  }
+
+  NLatLng _polygonCenter(List<Map<String, double>> polygon) {
+    if (polygon.isEmpty) {
+      return _initialPosition;
+    }
+
+    final lat = polygon.fold<double>(0, (sum, point) => sum + point['lat']!) /
+        polygon.length;
+    final lng = polygon.fold<double>(0, (sum, point) => sum + point['lng']!) /
+        polygon.length;
+    return NLatLng(lat, lng);
+  }
+
+  String? _nextUnplacedTeamId() {
+    for (final team in _teams) {
+      if (!_spawnCenters.containsKey(team.teamId)) {
+        return team.teamId;
+      }
+    }
+    return null;
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
+
+  Color _hexToColor(String hex) {
+    final buffer = StringBuffer();
+    if (hex.length == 7) {
+      buffer.write('ff');
+    }
+    buffer.write(hex.replaceFirst('#', ''));
+    return Color(int.parse(buffer.toString(), radix: 16));
+  }
 
   @override
   Widget build(BuildContext context) {
+    final teamButtons = _teams
+        .map(
+          (team) => ChoiceChip(
+            label: Text(team.displayName),
+            selected: _selectedTeamId == team.teamId,
+            selectedColor: _hexToColor(team.color).withValues(alpha: 0.18),
+            onSelected: _step == _LayoutStep.spawns
+                ? (_) => setState(() => _selectedTeamId = team.teamId)
+                : null,
+          ),
+        )
+        .toList();
+
     return Scaffold(
-      backgroundColor: Colors.black,
       appBar: AppBar(
-        backgroundColor: const Color(0xFF1A1A2E),
-        foregroundColor: Colors.white,
-        title: const Text(
-          '플레이 영역 설정',
-          style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
+        title: Text(
+          _isFantasyWars ? '전장 설정' : '플레이 구역 설정',
         ),
         actions: [
           IconButton(
-            tooltip: '마지막 꼭짓점 취소',
-            icon: const Icon(Icons.undo_rounded),
-            onPressed: _vertices.isEmpty ? null : _undoLastVertex,
+            onPressed: _isSaving ? null : _undo,
+            icon: const Icon(Icons.undo),
+            tooltip: '실행 취소',
           ),
           IconButton(
-            tooltip: '전체 초기화',
-            icon: const Icon(Icons.delete_outline_rounded),
-            onPressed: _vertices.isEmpty ? null : _clearAll,
+            onPressed: _isSaving ? null : _clearCurrentStep,
+            icon: const Icon(Icons.delete_outline),
+            tooltip: '현재 단계 지우기',
           ),
         ],
       ),
-      body: Stack(
-        children: [
-          // ── 네이버 지도 ────────────────────────────────────────────────────
-          NaverMap(
-            options: NaverMapViewOptions(
-              initialCameraPosition: NCameraPosition(
-                target: _initialPosition,
-                zoom: 17,
-              ),
-              mapType: NMapType.basic,
-              consumeSymbolTapEvents: false,
-            ),
-            onMapReady: (controller) {
-              _mapController = controller;
-              _refreshOverlays();
-            },
-            onMapTapped: _onMapTapped,
-          ),
-
-          // ── 안내 배너 (꼭짓점 0개일 때만 표시) ──────────────────────────
-          if (_vertices.isEmpty)
-            Positioned(
-              top: 16,
-              left: 24,
-              right: 24,
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.75),
-                  borderRadius: BorderRadius.circular(12),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : Stack(
+              children: [
+                NaverMap(
+                  options: NaverMapViewOptions(
+                    initialCameraPosition: NCameraPosition(
+                      target: _initialPosition,
+                      zoom: 17,
+                    ),
+                  ),
+                  onMapReady: (controller) {
+                    _mapController = controller;
+                    unawaited(_refreshOverlays());
+                  },
+                  onMapTapped: _onMapTapped,
                 ),
-                child: const Text(
-                  '지도를 터치해 플레이 구역의 꼭짓점을 찍으세요.\n'
-                  '최소 3개 이상을 찍어야 저장할 수 있습니다.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.white70, fontSize: 13),
-                ),
-              ),
-            ),
-
-          // ── 꼭짓점 카운터 ──────────────────────────────────────────────
-          if (_vertices.isNotEmpty)
-            Positioned(
-              top: 16,
-              left: 16,
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.75),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Text(
-                  '꼭짓점 ${_vertices.length}개',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
+                Positioned(
+                  top: 16,
+                  left: 16,
+                  right: 16,
+                  child: Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          SegmentedButton<_LayoutStep>(
+                            showSelectedIcon: false,
+                            segments: const [
+                              ButtonSegment(
+                                value: _LayoutStep.area,
+                                label: Text('구역'),
+                              ),
+                              ButtonSegment(
+                                value: _LayoutStep.controlPoints,
+                                label: Text('점령지'),
+                              ),
+                              ButtonSegment(
+                                value: _LayoutStep.spawns,
+                                label: Text('팀 시작 지점'),
+                              ),
+                            ],
+                            selected: {_step},
+                            onSelectionChanged: (selection) {
+                              setState(() => _step = selection.first);
+                            },
+                          ),
+                          const SizedBox(height: 12),
+                          Text(_stepDescription()),
+                          const SizedBox(height: 8),
+                          Text(
+                            _statusLine(),
+                            style: TextStyle(
+                              color: Colors.grey.shade700,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          if (_step == _LayoutStep.controlPoints) ...[
+                            const SizedBox(height: 8),
+                            Text(
+                              '배치됨 ${_controlPoints.length} / $_controlPointCount',
+                            ),
+                          ],
+                          if (_step == _LayoutStep.spawns) ...[
+                            const SizedBox(height: 8),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: teamButtons,
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
                   ),
                 ),
-              ),
-            ),
-
-          // ── 내 위치 버튼 ───────────────────────────────────────────────
-          Positioned(
-            right: 16,
-            bottom: 104,
-            child: FloatingActionButton.small(
-              heroTag: 'my_location',
-              onPressed: _moveToCurrentPosition,
-              backgroundColor: Colors.white,
-              foregroundColor: Colors.black87,
-              tooltip: '내 위치로 이동',
-              child: const Icon(Icons.my_location_rounded),
-            ),
-          ),
-
-          // ── 저장 버튼 ──────────────────────────────────────────────────
-          Positioned(
-            bottom: 32,
-            left: 24,
-            right: 24,
-            child: FilledButton.icon(
-              style: FilledButton.styleFrom(
-                backgroundColor: _vertices.length >= 3
-                    ? const Color(0xFF4F46E5)
-                    : Colors.grey.shade700,
-                minimumSize: const Size.fromHeight(52),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
+                Positioned(
+                  right: 16,
+                  bottom: 96,
+                  child: FloatingActionButton.small(
+                    heroTag: 'layout_my_location',
+                    onPressed: _moveToCurrentPosition,
+                    child: const Icon(Icons.my_location),
+                  ),
                 ),
-              ),
-              onPressed: (_vertices.length >= 3 && !_isSaving) ? _save : null,
-              icon: _isSaving
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white),
-                    )
-                  : const Icon(Icons.check_circle_outline_rounded,
-                      color: Colors.white),
-              label: Text(
-                _isSaving ? '저장 중…' : '이 영역으로 게임 시작',
-                style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600),
-              ),
+                Positioned(
+                  left: 16,
+                  right: 16,
+                  bottom: 24,
+                  child: FilledButton.icon(
+                    onPressed: _isSaving ? null : _save,
+                    icon: _isSaving
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Icon(Icons.save),
+                    label: Text(
+                      _isSaving
+                          ? '저장 중...'
+                          : (_isFantasyWars ? '전장 저장' : '설정 저장'),
+                    ),
+                  ),
+                ),
+              ],
             ),
-          ),
-        ],
-      ),
     );
+  }
+
+  String _stepDescription() {
+    switch (_step) {
+      case _LayoutStep.area:
+        return '지도를 눌러 전체 플레이 전장 경계를 그려주세요.';
+      case _LayoutStep.controlPoints:
+        return '플레이 구역 안에 점령지 5개를 배치해주세요.';
+      case _LayoutStep.spawns:
+        return '길드를 선택한 뒤 지도를 눌러 시작 및 리스폰 지점을 배치해주세요.';
+    }
+  }
+
+  String _statusLine() {
+    switch (_step) {
+      case _LayoutStep.area:
+        return '구역 꼭짓점: ${_areaVertices.length}';
+      case _LayoutStep.controlPoints:
+        return '점령지: ${_controlPoints.length} / $_controlPointCount';
+      case _LayoutStep.spawns:
+        return '길드 시작 지점: ${_spawnCenters.length} / ${_teams.length}';
+    }
   }
 }
 
-// ── 꼭짓점 번호 표시 위젯 ─────────────────────────────────────────────────────
+class _NumberDot extends StatelessWidget {
+  const _NumberDot({
+    required this.label,
+    required this.color,
+  });
 
-class _VertexDot extends StatelessWidget {
-  const _VertexDot({required this.index});
-
-  final int index;
+  final String label;
+  final Color color;
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 28,
-      height: 28,
+      width: 30,
+      height: 30,
       decoration: BoxDecoration(
-        color: Colors.blue,
+        color: color,
         shape: BoxShape.circle,
         border: Border.all(color: Colors.white, width: 2),
         boxShadow: const [
-          BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0, 2)),
+          BoxShadow(
+            color: Colors.black26,
+            blurRadius: 4,
+            offset: Offset(0, 2),
+          ),
         ],
       ),
       child: Center(
         child: Text(
-          '$index',
+          label,
           style: const TextStyle(
             color: Colors.white,
             fontSize: 11,
             fontWeight: FontWeight.bold,
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SpawnBadge extends StatelessWidget {
+  const _SpawnBadge({
+    required this.label,
+    required this.color,
+    required this.selected,
+  });
+
+  final String label;
+  final Color color;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: selected ? color : color.withValues(alpha: 0.85),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: Colors.white, width: selected ? 2 : 1),
+      ),
+      child: Text(
+        label,
+        style: const TextStyle(
+          color: Colors.white,
+          fontWeight: FontWeight.bold,
+          fontSize: 12,
         ),
       ),
     );

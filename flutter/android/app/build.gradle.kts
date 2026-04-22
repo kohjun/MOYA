@@ -39,6 +39,12 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            // Ship only device ABIs in release builds. The current x86_64 native
+            // dependency stack still triggers 16 KB page-size compatibility
+            // warnings, while the Play-distributed device target here is arm64.
+            ndk {
+                abiFilters += setOf("arm64-v8a", "armeabi-v7a")
+            }
         }
     }
 

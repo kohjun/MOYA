@@ -1,22 +1,30 @@
 'use strict';
 
 const plugins = new Map();
+const aliases = new Map([
+  ['fantasy_wars', 'fantasy_wars_artifact'],
+]);
 
 function register(plugin) {
   plugins.set(plugin.gameType, plugin);
 }
 
 function get(gameType) {
-  const plugin = plugins.get(gameType);
-  if (!plugin) throw new Error(`게임 플러그인 없음: ${gameType}`);
+  const resolvedGameType = aliases.get(gameType) ?? gameType;
+  const plugin = plugins.get(resolvedGameType);
+  if (!plugin) {
+    throw new Error(`Game plugin not found: ${gameType}`);
+  }
   return plugin;
 }
 
 function list() {
-  return [...plugins.values()].map(p => ({
-    gameType:    p.gameType,
-    displayName: p.displayName,
-    configSchema: p.configSchema,
+  return [...plugins.values()].map((plugin) => ({
+    gameType: plugin.gameType,
+    displayName: plugin.displayName,
+    configSchema: plugin.configSchema,
+    defaultConfig: plugin.defaultConfig ?? {},
+    capabilities: plugin.capabilities ?? [],
   }));
 }
 

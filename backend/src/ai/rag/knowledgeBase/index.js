@@ -3,11 +3,12 @@
 // 전체 게임 지식 베이스 진입점
 // 새 게임 추가 시 여기에 import만 추가하면 됩니다.
 
-import commonChunks  from './among_us/common.js';
-import crewChunks    from './among_us/crew.js';
+import commonChunks   from './among_us/common.js';
+import crewChunks     from './among_us/crew.js';
 import impostorChunks from './among_us/impostor.js';
-import itemsChunks   from './among_us/items.js';
-import faqChunks     from './among_us/faq.js';
+import itemsChunks    from './among_us/items.js';
+import faqChunks      from './among_us/faq.js';
+import fwRulesChunks  from './fantasy_wars/rules.js';
 
 const amongUsChunks = [
   ...commonChunks,
@@ -17,12 +18,13 @@ const amongUsChunks = [
   ...faqChunks,
 ];
 
-// 추후 추가 예시:
-// import mafiaChunks from './mafia/index.js';
+const fantasyWarsChunks = [
+  ...fwRulesChunks,
+];
 
 export const ALL_CHUNKS = [
   ...amongUsChunks,
-  // ...mafiaChunks,
+  ...fantasyWarsChunks,
 ];
 
 // 임베딩할 텍스트 생성 (자식 청크만)

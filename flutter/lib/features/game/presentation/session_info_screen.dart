@@ -11,8 +11,9 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../home/data/session_repository.dart';
+import '../../home/data/session_repository.dart' show Session, sessionListProvider;
 import '../data/game_models.dart';
+import 'game_ui_plugin.dart';
 import '../providers/game_provider.dart';
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -23,11 +24,11 @@ class SessionInfoScreen extends ConsumerWidget {
   const SessionInfoScreen({
     super.key,
     required this.sessionId,
-    required this.sessionType,
+    this.gameType,
   });
 
   final String sessionId;
-  final SessionType sessionType;
+  final String? gameType;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -36,7 +37,7 @@ class SessionInfoScreen extends ConsumerWidget {
       body: SafeArea(
         child: SessionInfoContent(
           sessionId: sessionId,
-          sessionType: sessionType,
+          gameType: gameType,
           onClose: () => Navigator.of(context).maybePop(),
         ),
       ),
@@ -53,12 +54,12 @@ class SessionInfoContent extends ConsumerStatefulWidget {
   const SessionInfoContent({
     super.key,
     required this.sessionId,
-    required this.sessionType,
+    this.gameType,
     required this.onClose,
   });
 
   final String sessionId;
-  final SessionType sessionType;
+  final String? gameType;
   final VoidCallback onClose;
 
   @override
@@ -234,7 +235,7 @@ class _SessionInfoContentState extends ConsumerState<SessionInfoContent> {
 
   // ── 세션 카드 ─────────────────────────────────────────────────────────────
   Widget _buildSessionCard(Session session) {
-    final typeLabel = _sessionTypeLabel(widget.sessionType);
+    final typeLabel = _gameLabel(session.gameType.isEmpty ? widget.gameType : session.gameType);
     final remaining = session.expiresAt != null
         ? session.expiresAt!.difference(DateTime.now())
         : null;
@@ -464,17 +465,10 @@ class _SessionInfoContentState extends ConsumerState<SessionInfoContent> {
     );
   }
 
-  String _sessionTypeLabel(SessionType type) {
-    switch (type) {
-      case SessionType.chase:
-        return '공간 추격전';
-      case SessionType.verbal:
-        return '언어 추론';
-      case SessionType.location:
-        return '위치 탐색';
-      default:
-        return '기본';
-    }
+  String _gameLabel(String? gt) {
+    final plugin = GameUiPluginRegistry.get(gt ?? '');
+    if (plugin != null) return plugin.displayName;
+    return gt ?? '알 수 없음';
   }
 }
 

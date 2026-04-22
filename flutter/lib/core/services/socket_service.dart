@@ -69,6 +69,7 @@ class SocketEvents {
   static const sessionJoined = 'session:joined';
   static const memberJoined = 'member:joined';
   static const memberLeft = 'member:left';
+  static const memberUpdated = 'member:updated';
   static const locationChanged = 'location:changed';
   static const statusChanged = 'status:changed';
   static const sosAlert = 'sos:alert';
@@ -120,6 +121,8 @@ class SocketService {
       StreamController<Map<String, dynamic>>.broadcast();
   final _memberLeftController =
       StreamController<Map<String, dynamic>>.broadcast();
+  final _memberUpdatedController =
+      StreamController<Map<String, dynamic>>.broadcast();
   final _statusController = StreamController<Map<String, dynamic>>.broadcast();
   final _sosController = StreamController<Map<String, dynamic>>.broadcast();
   final _snapshotController =
@@ -151,10 +154,21 @@ class SocketService {
   final Map<String, StreamController<Map<String, dynamic>>>
       _gameEventControllers = {};
 
+  // FW 대결 스트림 컨트롤러
+  final _fwDuelChallengedController  = StreamController<Map<String, dynamic>>.broadcast();
+  final _fwDuelAcceptedController    = StreamController<Map<String, dynamic>>.broadcast();
+  final _fwDuelRejectedController    = StreamController<Map<String, dynamic>>.broadcast();
+  final _fwDuelCancelledController   = StreamController<Map<String, dynamic>>.broadcast();
+  final _fwDuelStartedController     = StreamController<Map<String, dynamic>>.broadcast();
+  final _fwDuelResultController      = StreamController<Map<String, dynamic>>.broadcast();
+  final _fwDuelInvalidatedController = StreamController<Map<String, dynamic>>.broadcast();
+
   Stream<LocationPayload> get onLocationChanged => _locationController.stream;
   Stream<Map<String, dynamic>> get onMemberJoined =>
       _memberJoinController.stream;
   Stream<Map<String, dynamic>> get onMemberLeft => _memberLeftController.stream;
+  Stream<Map<String, dynamic>> get onMemberUpdated =>
+      _memberUpdatedController.stream;
   Stream<Map<String, dynamic>> get onStatusChanged => _statusController.stream;
   Stream<Map<String, dynamic>> get onSosAlert => _sosController.stream;
   Stream<Map<String, dynamic>> get onSnapshot => _snapshotController.stream;
@@ -181,6 +195,15 @@ class SocketService {
       _mediaProducerClosedController.stream;
   Stream<Map<String, dynamic>> get onVoiceSpeaking =>
       _voiceSpeakingController.stream;
+
+  // FW 대결 스트림 getter
+  Stream<Map<String, dynamic>> get onFwDuelChallenged  => _fwDuelChallengedController.stream;
+  Stream<Map<String, dynamic>> get onFwDuelAccepted    => _fwDuelAcceptedController.stream;
+  Stream<Map<String, dynamic>> get onFwDuelRejected    => _fwDuelRejectedController.stream;
+  Stream<Map<String, dynamic>> get onFwDuelCancelled   => _fwDuelCancelledController.stream;
+  Stream<Map<String, dynamic>> get onFwDuelStarted     => _fwDuelStartedController.stream;
+  Stream<Map<String, dynamic>> get onFwDuelResult      => _fwDuelResultController.stream;
+  Stream<Map<String, dynamic>> get onFwDuelInvalidated => _fwDuelInvalidatedController.stream;
 
   bool get isConnected => _isConnected;
   String? get currentSessionId => _currentSessionId;
@@ -238,12 +261,10 @@ class SocketService {
         _reconnectScheduled = false;
         _reconnectTimer?.cancel();
         _connectionController.add(true);
-        debugPrint('[Socket] Connected');
       })
       ..onDisconnect((reason) {
         _isConnected = false;
         _connectionController.add(false);
-        debugPrint('[Socket] Disconnected: $reason');
         // 클라이언트 측 수동 해제가 아닐 때만 재연결 시도
         if (reason != 'io client disconnect') {
           _scheduleReconnect();
@@ -270,6 +291,10 @@ class SocketService {
           (data) => _memberJoinController.add(Map<String, dynamic>.from(data)))
       ..on(SocketEvents.memberLeft,
           (data) => _memberLeftController.add(Map<String, dynamic>.from(data)))
+      ..on(
+          SocketEvents.memberUpdated,
+          (data) => _memberUpdatedController
+              .add(Map<String, dynamic>.from(data as Map? ?? {})))
 
       // 상태 변경
       ..on(SocketEvents.statusChanged,
@@ -365,8 +390,27 @@ class SocketService {
       ..on(gameSabotageFixed,
           (data) => _emitGameEvent(gameSabotageFixed, data))
       ..on(gameMissionsAssigned,
-          (data) => _emitGameEvent(gameMissionsAssigned, data));
+          (data) => _emitGameEvent(gameMissionsAssigned, data))
+
+      // FW 대결 이벤트 수신
+      ..on(fwDuelChallenged,
+          (data) => _fwDuelChallengedController.add(_toMap(data)))
+      ..on(fwDuelAccepted,
+          (data) => _fwDuelAcceptedController.add(_toMap(data)))
+      ..on(fwDuelRejected,
+          (data) => _fwDuelRejectedController.add(_toMap(data)))
+      ..on(fwDuelCancelled,
+          (data) => _fwDuelCancelledController.add(_toMap(data)))
+      ..on(fwDuelStarted,
+          (data) => _fwDuelStartedController.add(_toMap(data)))
+      ..on(fwDuelResult,
+          (data) => _fwDuelResultController.add(_toMap(data)))
+      ..on(fwDuelInvalidated,
+          (data) => _fwDuelInvalidatedController.add(_toMap(data)));
   }
+
+  static Map<String, dynamic> _toMap(dynamic data) =>
+      Map<String, dynamic>.from(data as Map? ?? {});
 
   // ... (아래 joinSession, sendLocation 등 나머지 코드는 기존과 완벽히 동일하므로 생략하지 않고 그대로 유지하세요) ...
 
@@ -591,8 +635,6 @@ class SocketService {
       _baseDelayMs * math.pow(2, _reconnectAttempts).toInt(),
       _maxDelayMs,
     );
-    debugPrint(
-        '[Socket] 재연결 예약: ${delayMs}ms 후 (시도 ${_reconnectAttempts + 1}/$_maxReconnectAttempts)');
 
     _reconnectTimer = Timer(Duration(milliseconds: delayMs), () {
       _reconnectScheduled = false;
@@ -620,6 +662,7 @@ class SocketService {
     _locationController.close();
     _memberJoinController.close();
     _memberLeftController.close();
+    _memberUpdatedController.close();
     _statusController.close();
     _sosController.close();
     _snapshotController.close();
@@ -634,11 +677,42 @@ class SocketService {
     _gameStartedController.close();
     _mediaNewProducerController.close();
     _mediaProducerClosedController.close();
+    _fwDuelChallengedController.close();
+    _fwDuelAcceptedController.close();
+    _fwDuelRejectedController.close();
+    _fwDuelCancelledController.close();
+    _fwDuelStartedController.close();
+    _fwDuelResultController.close();
+    _fwDuelInvalidatedController.close();
     for (final controller in _gameEventControllers.values) {
       controller.close();
     }
     _gameEventControllers.clear();
   }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Fantasy Wars — 대결 이벤트 상수 (fw:duel namespace)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // Client → Server
+  static const String fwCaptureStart  = 'fw:capture_start';
+  static const String fwCaptureCancel = 'fw:capture_cancel';
+  static const String fwUseSkill      = 'fw:use_skill';
+  static const String fwDungeonEnter  = 'fw:dungeon_enter';
+  static const String fwDuelChallenge = 'fw:duel:challenge';
+  static const String fwDuelAccept    = 'fw:duel:accept';
+  static const String fwDuelReject    = 'fw:duel:reject';
+  static const String fwDuelCancel    = 'fw:duel:cancel';
+  static const String fwDuelSubmit    = 'fw:duel:submit';
+
+  // Server → Client
+  static const String fwDuelChallenged  = 'fw:duel:challenged';
+  static const String fwDuelAccepted    = 'fw:duel:accepted';
+  static const String fwDuelRejected    = 'fw:duel:rejected';
+  static const String fwDuelCancelled   = 'fw:duel:cancelled';
+  static const String fwDuelStarted     = 'fw:duel:started';
+  static const String fwDuelResult      = 'fw:duel:result';
+  static const String fwDuelInvalidated = 'fw:duel:invalidated';
 
   // ─────────────────────────────────────────────────────────────────────────
   // 게임 이벤트 상수 (Among Us 플러그인)
@@ -747,5 +821,81 @@ class SocketService {
 
   Stream<Map<String, dynamic>> onGameEvent(String event) {
     return _controllerForGameEvent(event).stream;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Fantasy Wars — 대결 액션 메서드
+  // ─────────────────────────────────────────────────────────────────────────
+
+  Future<Map<String, dynamic>> sendFwCaptureStart(
+    String sessionId,
+    String controlPointId,
+  ) {
+    return emitWithAck(fwCaptureStart, {
+      'sessionId': sessionId,
+      'controlPointId': controlPointId,
+    });
+  }
+
+  Future<Map<String, dynamic>> sendFwCaptureCancel(
+    String sessionId,
+    String controlPointId,
+  ) {
+    return emitWithAck(fwCaptureCancel, {
+      'sessionId': sessionId,
+      'controlPointId': controlPointId,
+    });
+  }
+
+  Future<Map<String, dynamic>> sendFwUseSkill(
+    String sessionId, {
+    required String skill,
+    String? targetUserId,
+    String? controlPointId,
+  }) {
+    return emitWithAck(fwUseSkill, {
+      'sessionId': sessionId,
+      'skill': skill,
+      if (targetUserId != null) 'targetUserId': targetUserId,
+      if (controlPointId != null) 'controlPointId': controlPointId,
+    });
+  }
+
+  Future<Map<String, dynamic>> sendFwDungeonEnter(
+    String sessionId, {
+    String dungeonId = 'dungeon_main',
+  }) {
+    return emitWithAck(fwDungeonEnter, {
+      'sessionId': sessionId,
+      'dungeonId': dungeonId,
+    });
+  }
+
+  Future<Map<String, dynamic>> sendDuelChallenge(
+    String sessionId,
+    String targetUserId,
+  ) {
+    return emitWithAck(fwDuelChallenge, {
+      'sessionId':    sessionId,
+      'targetUserId': targetUserId,
+    });
+  }
+
+  Future<Map<String, dynamic>> sendDuelAccept(String duelId) =>
+      emitWithAck(fwDuelAccept, {'duelId': duelId});
+
+  Future<Map<String, dynamic>> sendDuelReject(String duelId) =>
+      emitWithAck(fwDuelReject, {'duelId': duelId});
+
+  Future<Map<String, dynamic>> sendDuelCancel(String duelId) =>
+      emitWithAck(fwDuelCancel, {'duelId': duelId});
+
+  /// result: 미니게임 유형별 제출 데이터
+  /// e.g. { 'reactionMs': 320 } / { 'tapCount': 25, 'durationMs': 5000 } 등
+  Future<Map<String, dynamic>> sendDuelSubmit(
+    String duelId,
+    Map<String, dynamic> result,
+  ) {
+    return emitWithAck(fwDuelSubmit, {'duelId': duelId, 'result': result});
   }
 }

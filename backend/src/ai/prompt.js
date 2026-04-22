@@ -39,8 +39,12 @@ const PROMPTS = {
 게임이 시작됐어.
 플레이어 수는 ${playerCount}명이고, 임포스터 수는 ${impostorCount}명이야.
 
-첫 시작에 어울리는 짧고 긴장감 있는 오프닝 멘트를 만들어줘.
-임포스터 수는 직접 공개하지 마.
+[출력 규칙]
+- 정확히 2~3문장, 총 120자 이내의 한국어 오프닝 멘트만 출력해.
+- 각 문장은 마침표(또는 !, ?)로 끝내서 완결된 문장으로 마무리해.
+- "알겠습니다", "다음은", "오프닝 멘트" 같은 메타 서두/해설 금지. 본문만 출력.
+- 임포스터 수는 직접 공개하지 마.
+- 긴장감 있는 진행자 톤으로.
   `,
 
   kill: (victimNickname, zone, killCount, remainingCrew, remainingImpostors) => `
@@ -157,4 +161,76 @@ ${ejectedNickname}이(가) ${voteCount}표로 추방됐지만 크루였어.
   `,
 };
 
-export { VALIDATOR_SYSTEM_PROMPT, SYSTEM_PROMPT, PROMPTS };
+// ── 판타지 워즈 내러티브 시스템 프롬프트 ─────────────────────────────────────
+const FW_SYSTEM_PROMPT = `
+너는 "AI MOYA"야.
+판타지 워즈: 성유물 쟁탈전의 전지적 진행자로 행동해.
+
+[역할]
+- 전투, 거점 점령, 성유물 쟁탈의 긴장감을 살린다.
+- 직업별 전략 조언을 간결하게 제공한다.
+- 특정 길드를 편애하지 않는다.
+
+[규칙]
+- 타 길드의 직업이나 스킬 보유 여부를 직접 누설하지 않는다.
+- 모든 멘트는 3문장 이내, 판타지 전투 톤으로.
+- 이모지는 꼭 필요할 때만.
+`;
+
+const FW_PROMPTS = {
+  gameStart: (guildCount, playerCount) => `
+판타지 워즈가 시작됐어.
+${guildCount}개 길드, ${playerCount}명의 전사들이 성유물을 두고 격돌한다.
+
+[출력 규칙]
+- 2~3문장, 120자 이내.
+- 각 문장은 마침표/!/?로 끝내.
+- 판타지 서사 톤으로, 어느 길드도 직접 언급하지 마.
+  `,
+
+  cpCaptured: (guildId, cpName, capturedCount, totalCP) => `
+${guildId} 길드가 ${cpName} 거점을 점령했어.
+현재 ${capturedCount}/${totalCP} 거점 보유.
+
+긴장감 있는 짧은 전황 중계 멘트를 만들어줘.
+  `,
+
+  duelResult: (winnerNickname, loserNickname, minigameType, executionTriggered) => `
+대결 결과:
+승자: ${winnerNickname}
+패자: ${loserNickname}
+미니게임: ${minigameType}
+처형 발동: ${executionTriggered ? '예' : '아니오'}
+
+승패 여운이 남는 짧은 멘트를 만들어줘.
+  `,
+
+  duelDraw: (minigameType) => `
+대결이 무승부로 끝났어.
+미니게임: ${minigameType}
+
+무승부의 팽팽한 긴장감을 살리는 짧은 멘트를 만들어줘.
+  `,
+
+  artifactAvailable: (eligibleGuilds) => `
+성유물 거점 도전 자격이 생겼어.
+자격 길드: ${eligibleGuilds.join(', ')}
+
+클라이맥스 느낌의 짧은 전황 멘트를 만들어줘.
+  `,
+
+  playerEliminated: (nickname, guildId) => `
+${nickname}(${guildId} 길드)가 탈락했어.
+
+전세 변화를 알리는 짧은 멘트를 만들어줘. 특정 길드를 유리하다고 단정짓지 마.
+  `,
+
+  gameEnd: (winnerGuildId, reason) => `
+${winnerGuildId} 길드가 승리했어.
+승리 이유: ${reason === 'artifact' ? '성유물 쟁탈' : '거점 우세'}
+
+판타지 서사 톤으로 엔딩 멘트를 만들어줘.
+  `,
+};
+
+export { VALIDATOR_SYSTEM_PROMPT, SYSTEM_PROMPT, PROMPTS, FW_SYSTEM_PROMPT, FW_PROMPTS };

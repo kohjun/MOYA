@@ -79,7 +79,12 @@ Future<bool> onIosBackground(ServiceInstance service) async {
 // 백그라운드 서비스가 시작될 때 실행되는 메인 진입점
 @pragma('vm:entry-point')
 void onStart(ServiceInstance service) async {
-  DartPluginRegistrant.ensureInitialized();
+  // DartPluginRegistrant는 flutter_background_service_android 자체가
+  // 백그라운드 isolate에서 등록되려 할 때 "main isolate only" 예외를 던진다.
+  // try/catch로 해당 에러를 무시하고 계속 진행한다.
+  try {
+    DartPluginRegistrant.ensureInitialized();
+  } catch (_) {}
   await NotificationService().init();
 
   final prefs = await SharedPreferences.getInstance();

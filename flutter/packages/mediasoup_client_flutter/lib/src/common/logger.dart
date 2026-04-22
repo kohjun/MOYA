@@ -2,6 +2,9 @@ const String APP_NAME = 'mediasoup-client';
 
 typedef void LoggerDebug(dynamic message);
 
+// debug 로그를 활성화하려면 true로 변경
+const bool _kDebugLogging = false;
+
 class Logger {
   final String? _prefix;
 
@@ -11,9 +14,9 @@ class Logger {
 
   Logger(this._prefix) {
     if (_prefix != null) {
-      debug = (dynamic message) {
-        print('$APP_NAME:$_prefix $message');
-      };
+      debug = _kDebugLogging
+          ? (dynamic message) => print('$APP_NAME:$_prefix $message')
+          : (_) {};
       warn = (dynamic message) {
         print('$APP_NAME:WARN:$_prefix $message');
       };
@@ -21,9 +24,9 @@ class Logger {
         print('$APP_NAME:ERROR:$_prefix $message');
       };
     } else {
-      debug = (dynamic message) {
-        print('$APP_NAME $message');
-      };
+      debug = _kDebugLogging
+          ? (dynamic message) => print('$APP_NAME $message')
+          : (_) {};
       warn = (dynamic message) {
         print('$APP_NAME:WARN $message');
       };

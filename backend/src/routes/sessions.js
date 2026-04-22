@@ -6,6 +6,9 @@ import * as locationService from '../services/locationService.js';
 import { getIo, EVENTS } from '../websocket/index.js';
 import { startGameForSession } from '../game/startGameService.js';
 import * as AIDirector from '../ai/AIDirector.js';
+import { redisClient } from '../config/redis.js';
+import { keys } from '../websocket/socketRuntime.js';
+import * as MissionSystem from '../game/MissionSystem.js';
 
 const createSessionSchema = z.object({
   name: z.string().max(100).optional(),
@@ -13,18 +16,35 @@ const createSessionSchema = z.object({
   durationHours: z.number().min(1).max(72).optional(),
   maxMembers: z.number().min(2).max(50).optional(),
   gameType: z.string().optional(),
+  gameConfig: z.record(z.unknown()).optional(),
+  gameVersion: z.string().max(20).optional(),
   impostorCount: z.number().min(1).max(3).optional(),
   killCooldown: z.number().min(10).max(60).optional(),
   discussionTime: z.number().min(30).max(180).optional(),
   voteTime: z.number().min(15).max(60).optional(),
   missionPerCrew: z.number().min(1).max(5).optional(),
-  // [Task 5] 중첩 settings 객체도 허용 (Flutter createSession에서 전송 가능)
   settings: z.object({
     killCooldown:      z.number().min(10).max(60).optional(),
     emergencyCooldown: z.number().min(30).max(180).optional(),
     voteTime:          z.number().min(15).max(60).optional(),
     missionPerCrew:    z.number().min(1).max(5).optional(),
   }).optional(),
+});
+
+const geoPointSchema = z.object({
+  lat: z.number().finite().min(-90).max(90),
+  lng: z.number().finite().min(-180).max(180),
+});
+
+const polygonSchema = z.array(geoPointSchema).min(3);
+
+const fantasyWarsLayoutSchema = z.object({
+  playableArea: polygonSchema,
+  controlPoints: z.array(geoPointSchema).min(1),
+  spawnZones: z.array(z.object({
+    teamId: z.string().min(1),
+    polygonPoints: polygonSchema,
+  })).min(1),
 });
 
 // [Task 5] settings 중첩 객체를 최상위 필드로 병합 (기존 최상위 값이 우선)
@@ -37,6 +57,8 @@ const normalizeCreateSessionBody = (body = {}) => {
     discussionTime: rest.discussionTime ?? settings?.emergencyCooldown,
     voteTime:       rest.voteTime       ?? settings?.voteTime,
     missionPerCrew: rest.missionPerCrew ?? settings?.missionPerCrew,
+    gameConfig:     rest.gameConfig     ?? {},
+    gameVersion:    rest.gameVersion    ?? '1.0',
   };
 };
 
@@ -54,6 +76,18 @@ export default async function sessionRoutes(fastify) {
         { error, roomId, userId },
         '[AI] Failed to clean session history',
       );
+    }
+  };
+
+  const cleanupGameState = async (sessionId) => {
+    try {
+      await Promise.all([
+        redisClient.del(keys.state(sessionId)),
+        redisClient.del(keys.started(sessionId)),
+        MissionSystem.clearSession(sessionId),
+      ]);
+    } catch (error) {
+      fastify.log.warn({ error, sessionId }, '[Game] Failed to clean game state from Redis');
     }
   };
 
@@ -128,11 +162,44 @@ export default async function sessionRoutes(fastify) {
     }
   });
 
+  fastify.patch('/:sessionId/fantasy-wars-layout', async (request, reply) => {
+    const { sessionId } = request.params;
+    const parsed = fantasyWarsLayoutSchema.safeParse(request.body || {});
+
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'INVALID_LAYOUT' });
+    }
+
+    try {
+      const result = await sessionService.setFantasyWarsLayout(
+        request.user.id,
+        sessionId,
+        parsed.data,
+      );
+      return reply.send({
+        playableArea: result.playable_area,
+        gameConfig: result.game_config,
+      });
+    } catch (err) {
+      const errorMap = {
+        SESSION_NOT_FOUND_OR_NOT_HOST: 403,
+        INVALID_GAME_TYPE: 400,
+        INVALID_POLYGON: 400,
+        INVALID_CONTROL_POINTS: 400,
+        INVALID_SPAWN_ZONES: 400,
+      };
+      return reply.code(errorMap[err.message] || 500).send({ error: err.message });
+    }
+  });
+
   fastify.post('/:sessionId/end', async (request, reply) => {
     try {
       const { sessionId } = request.params;
       await sessionService.endSession(request.user.id, sessionId);
-      await cleanupAiHistory({ roomId: sessionId });
+      await Promise.all([
+        cleanupAiHistory({ roomId: sessionId }),
+        cleanupGameState(sessionId),
+      ]);
       return reply.send({ message: 'Session ended' });
     } catch (err) {
       if (err.message === 'SESSION_NOT_FOUND_OR_NOT_HOST') {
@@ -191,7 +258,10 @@ export default async function sessionRoutes(fastify) {
     try {
       const { sessionId } = request.params;
       await sessionService.endSession(request.user.id, sessionId);
-      await cleanupAiHistory({ roomId: sessionId });
+      await Promise.all([
+        cleanupAiHistory({ roomId: sessionId }),
+        cleanupGameState(sessionId),
+      ]);
       return reply.send({ message: 'Session ended' });
     } catch (err) {
       if (err.message === 'SESSION_NOT_FOUND_OR_NOT_HOST') {
@@ -248,41 +318,40 @@ export default async function sessionRoutes(fastify) {
     });
   });
 
-  fastify.patch('/:sessionId/members/:userId/role', async (request, reply) => {
+  fastify.patch('/:sessionId/members/:userId/team', async (request, reply) => {
     const { sessionId, userId: targetUserId } = request.params;
-    const { role: newRole } = request.body || {};
+    const { teamId } = request.body || {};
 
-    if (!['admin', 'member'].includes(newRole)) {
-      return reply.code(400).send({ error: 'INVALID_ROLE' });
+    if (!teamId || typeof teamId !== 'string') {
+      return reply.code(400).send({ error: 'INVALID_TEAM' });
     }
 
     try {
-      await sessionService.updateMemberRole(
+      const result = await sessionService.moveMemberToTeam(
         request.user.id,
         sessionId,
         targetUserId,
-        newRole,
+        teamId,
       );
 
       const io = getIo();
       if (io) {
-        io.to(`session:${sessionId}`).emit(EVENTS.ROLE_CHANGED, {
+        io.to(`session:${sessionId}`).emit(EVENTS.MEMBER_UPDATED, {
           userId: targetUserId,
-          role: newRole,
+          teamId: result.team_id,
           sessionId,
           updatedBy: request.user.id,
         });
       }
 
-      return reply.send({ role: newRole });
+      return reply.send({ teamId: result.team_id });
     } catch (err) {
       const errorMap = {
         PERMISSION_DENIED: 403,
-        CANNOT_CHANGE_OWN_ROLE: 400,
-        CANNOT_CHANGE_HOST_ROLE: 400,
         TARGET_NOT_A_MEMBER: 404,
         SESSION_NOT_FOUND: 404,
-        INVALID_ROLE: 400,
+        INVALID_TEAM: 400,
+        INVALID_GAME_TYPE: 400,
       };
       return reply.code(errorMap[err.message] || 500).send({ error: err.message });
     }
@@ -349,6 +418,9 @@ export default async function sessionRoutes(fastify) {
       }
       if (err.message === 'NOT_HOST') {
         return reply.code(403).send({ error: err.message });
+      }
+      if (err.message === 'GAME_ALREADY_STARTED') {
+        return reply.code(409).send({ error: err.message });
       }
       if (err.message === 'NOT_ENOUGH_PLAYERS') {
         return reply.code(400).send({

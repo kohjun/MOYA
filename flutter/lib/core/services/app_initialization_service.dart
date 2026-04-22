@@ -82,8 +82,6 @@ class AppInitializationService {
     String label,
     Future<void> Function() action,
   ) async {
-    final stopwatch = Stopwatch()..start();
     await action();
-    debugPrint('[Startup] $label completed in ${stopwatch.elapsedMilliseconds}ms');
   }
 }

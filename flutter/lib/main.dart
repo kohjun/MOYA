@@ -8,6 +8,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'app.dart';
 import 'core/services/app_initialization_service.dart';
 import 'core/services/fcm_service.dart';
+import 'features/game/presentation/game_ui_plugin.dart';
+import 'features/game/presentation/plugins/among_us/among_us_legacy_ui_plugin.dart';
+import 'features/game/presentation/plugins/fantasy_wars/fantasy_wars_ui_plugin.dart';
 
 void _logUnhandledError(
   String source,
@@ -18,9 +21,15 @@ void _logUnhandledError(
   debugPrintStack(label: '[$source] stack', stackTrace: stackTrace);
 }
 
+void _registerGamePlugins() {
+  GameUiPluginRegistry.register(const AmongUsLegacyUiPlugin());
+  GameUiPluginRegistry.register(const FantasyWarsUiPlugin());
+}
+
 Future<void> main() async {
   await runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
+    _registerGamePlugins();
 
     FlutterError.onError = (details) {
       FlutterError.presentError(details);
@@ -72,13 +81,13 @@ Future<void> main() async {
 
     // SharedPreferences를 첫 프레임 전에 미리 warm-up합니다.
     // 이후 getInstance() 호출이 즉시 반환되어 resetBackgroundFlags 지연이 사라집니다.
-    unawaited(
-      AppInitializationService()
-          .getPrefs()
-          .catchError((Object error, StackTrace stackTrace) {
+    unawaited(() async {
+      try {
+        await AppInitializationService().getPrefs();
+      } catch (error, stackTrace) {
         _logUnhandledError('PrefsWarmup', error, stackTrace);
-      }),
-    );
+      }
+    }());
 
     runApp(
       const ProviderScope(

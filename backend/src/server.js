@@ -11,6 +11,7 @@ import { createSocketServer } from './websocket/index.js';
 import authRoutes from './routes/auth.js';
 import sessionRoutes from './routes/sessions.js';
 import geofenceRoutes from './routes/geofences.js';
+import gameRoutes from './routes/games.js';
 import { startSessionCleaner } from './cron/sessionCleaner.js';
 
 dotenv.config();
@@ -32,6 +33,7 @@ const createFastifyApp = async () => {
   fastify.register(authRoutes, { prefix: '/auth' });
   fastify.register(sessionRoutes, { prefix: '/sessions' });
   fastify.register(geofenceRoutes, { prefix: '/sessions' });
+  fastify.register(gameRoutes, { prefix: '/games' });
 
   fastify.get('/health', async () => {
     try {

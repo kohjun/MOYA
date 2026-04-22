@@ -1,31 +1,32 @@
-// lib/features/lobby/presentation/lobby_screen.dart
-
 import 'dart:async';
 
-import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'package:share_plus/share_plus.dart';
 
-import '../../../core/services/mediasoup_audio_service.dart';
 import '../../../core/services/socket_service.dart';
 import '../../auth/data/auth_repository.dart';
+import '../../game/presentation/game_ui_plugin.dart';
 import '../../game/presentation/playable_area_painter_screen.dart';
-import '../../home/data/session_repository.dart';
+import '../../home/data/session_repository.dart'
+    show
+        FantasyWarsTeamConfig,
+        Session,
+        SessionMember,
+        sessionListProvider;
 import '../providers/lobby_provider.dart';
 
 class LobbyScreen extends ConsumerStatefulWidget {
   const LobbyScreen({
     super.key,
     required this.sessionId,
-    required this.sessionType,
+    this.gameType,
   });
 
   final String sessionId;
-  final SessionType sessionType;
+  final String? gameType;
 
   @override
   ConsumerState<LobbyScreen> createState() => _LobbyScreenState();
@@ -33,10 +34,11 @@ class LobbyScreen extends ConsumerStatefulWidget {
 
 class _LobbyScreenState extends ConsumerState<LobbyScreen> {
   Timer? _countdownTimer;
+  StreamSubscription? _kickedSub;
   String _countdownText = '--:--:--';
   bool _startingGame = false;
-  bool _didNavigateToMap = false;
-  StreamSubscription? _kickedSub;
+  bool _didNavigateToGame = false;
+  bool _layoutSavedInThisVisit = false;
 
   @override
   void initState() {
@@ -45,17 +47,10 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
       _updateCountdown();
     });
 
-    _kickedSub = SocketService().onKicked.listen((_) async {
-      await _releaseRealtimeResources(notifyServer: false);
-      if (!mounted) return;
-
-      try {
-        await ref.read(sessionListProvider.notifier).refresh();
-      } catch (e) {
-        debugPrint('[Lobby] Failed to refresh sessions after kick: $e');
+    _kickedSub = SocketService().onKicked.listen((_) {
+      if (!mounted) {
+        return;
       }
-
-      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('세션에서 강제 퇴장되었습니다.'),
@@ -74,70 +69,172 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
   }
 
   void _updateCountdown() {
-    if (!mounted) return;
-    final lobbyState = ref.read(lobbyProvider(widget.sessionId));
-    final expiresAt = lobbyState.sessionInfo?.expiresAt;
-    if (expiresAt == null) return;
+    if (!mounted) {
+      return;
+    }
+
+    final expiresAt = ref.read(lobbyProvider(widget.sessionId)).sessionInfo?.expiresAt;
+    if (expiresAt == null) {
+      return;
+    }
 
     final diff = expiresAt.difference(DateTime.now());
     setState(() {
       if (diff.isNegative) {
         _countdownText = '00:00:00';
       } else {
-        final h = diff.inHours.toString().padLeft(2, '0');
-        final m = (diff.inMinutes % 60).toString().padLeft(2, '0');
-        final s = (diff.inSeconds % 60).toString().padLeft(2, '0');
-        _countdownText = '$h:$m:$s';
+        final hours = diff.inHours.toString().padLeft(2, '0');
+        final minutes = (diff.inMinutes % 60).toString().padLeft(2, '0');
+        final seconds = (diff.inSeconds % 60).toString().padLeft(2, '0');
+        _countdownText = '$hours:$minutes:$seconds';
       }
     });
+  }
+
+  Future<void> _confirmLeave() async {
+    final leave = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('세션 나가기'),
+        content: const Text('이 로비를 나가고 홈으로 돌아가시겠습니까?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('취소'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('나가기'),
+          ),
+        ],
+      ),
+    );
+
+    if (leave != true || !mounted) {
+      return;
+    }
+
+    try {
+      await ref.read(sessionListProvider.notifier).leaveSession(widget.sessionId);
+      await ref
+          .read(lobbyProvider(widget.sessionId).notifier)
+          .releaseRealtimeResources(notifyServer: false);
+      if (!mounted) {
+        return;
+      }
+      context.go('/');
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      _showError('나가기 실패: $error');
+    }
+  }
+
+  Future<void> _startGame() async {
+    setState(() => _startingGame = true);
+    try {
+      await ref.read(lobbyProvider(widget.sessionId).notifier).startGame();
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      _showError('게임 시작 실패: $error');
+    } finally {
+      if (mounted) {
+        setState(() => _startingGame = false);
+      }
+    }
+  }
+
+  Future<void> _openBattlefieldEditor() async {
+    final result = await Navigator.push<dynamic>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => PlayableAreaPainterScreen(sessionId: widget.sessionId),
+      ),
+    );
+
+    if (!mounted || result == null) {
+      return;
+    }
+
+    setState(() => _layoutSavedInThisVisit = true);
+    await ref.read(lobbyProvider(widget.sessionId).notifier).refresh();
+  }
+
+  void _showError(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.red,
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final lobbyState = ref.watch(lobbyProvider(widget.sessionId));
     final authUser = ref.watch(authProvider).valueOrNull;
-
-    if (lobbyState.isGameStarted && !_didNavigateToMap) {
-      _didNavigateToMap = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          context.go('/game/${widget.sessionId}?type=${widget.sessionType.name}');
-        }
-      });
-    }
-
     final session = lobbyState.sessionInfo;
     final members = lobbyState.members;
     final myUserId = authUser?.id ?? '';
-    final isHost = (session?.isHost ?? false) ||
-        members.any(
-          (member) =>
-              member.userId == myUserId &&
-              (member.isHost || member.role == 'host'),
-        );
+    final gameType = session?.gameType ?? widget.gameType ?? 'among_us';
+    final isFantasyWars = _isFantasyWars(gameType);
 
-    final minPlayers = widget.sessionType.minPlayers;
-    final currentCount = members.length;
-    final canStart = currentCount >= minPlayers;
+    if (lobbyState.isGameStarted && !_didNavigateToGame) {
+      _didNavigateToGame = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) {
+          return;
+        }
+        context.go('/game/${widget.sessionId}?gameType=$gameType');
+      });
+    }
+
+    final isHost = (session?.isHost ?? false) ||
+        members.any((member) => member.userId == myUserId && member.role == 'host');
+    final minPlayers = GameUiPluginRegistry.minPlayersFor(gameType);
+    final teams = _teamConfigsFor(session);
+    final layoutStatus = _FantasyWarsLayoutStatus.fromSession(session, teams.length);
+    final canStart = members.length >= minPlayers &&
+        (isFantasyWars
+            ? (layoutStatus.isReady || _layoutSavedInThisVisit)
+            : (session?.playableArea?.length ?? 0) >= 3 || _layoutSavedInThisVisit);
 
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
-        if (didPop) return;
-        _confirmLeave(context);
+        if (!didPop) {
+          unawaited(_confirmLeave());
+        }
       },
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('대기실'),
+          title: Text(session?.name.isNotEmpty == true ? session!.name : '로비'),
           leading: IconButton(
             icon: const Icon(Icons.arrow_back),
-            onPressed: () => _confirmLeave(context),
+            onPressed: _confirmLeave,
           ),
           actions: [
             IconButton(
-              icon: const Icon(Icons.exit_to_app),
-              tooltip: '세션 나가기',
-              onPressed: () => _confirmLeave(context),
+              icon: const Icon(Icons.copy),
+              tooltip: '초대 코드 복사',
+              onPressed: session == null
+                  ? null
+                  : () {
+                      Clipboard.setData(ClipboardData(text: session.code));
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('초대 코드가 복사되었습니다.')),
+                      );
+                    },
+            ),
+            IconButton(
+              icon: const Icon(Icons.share),
+              tooltip: '초대 코드 공유',
+              onPressed: session == null
+                  ? null
+                  : () => Share.share('초대 코드 ${session.code}로 제 세션에 참가해주세요.'),
             ),
           ],
         ),
@@ -146,336 +243,257 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
             : RefreshIndicator(
                 onRefresh: () =>
                     ref.read(lobbyProvider(widget.sessionId).notifier).refresh(),
-                child: SingleChildScrollView(
-                  physics: const AlwaysScrollableScrollPhysics(),
+                child: ListView(
                   padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      _SessionInfoSection(
-                        session: session,
-                        countdownText: _countdownText,
-                        sessionType: widget.sessionType,
-                      ),
-                      const SizedBox(height: 20),
-                      _ParticipantListSection(
+                  children: [
+                    _SessionSummaryCard(
+                      session: session,
+                      countdownText: _countdownText,
+                      gameType: gameType,
+                      memberCount: members.length,
+                    ),
+                    const SizedBox(height: 16),
+                    if (isFantasyWars) ...[
+                      _FantasyWarsLayoutCard(status: layoutStatus),
+                      const SizedBox(height: 16),
+                      _FantasyWarsTeamBoard(
+                        teams: teams,
                         members: members,
                         myUserId: myUserId,
                         isHost: isHost,
                         sessionId: widget.sessionId,
-                        speakingUserIds: lobbyState.speakingUserIds,
                       ),
-                      const SizedBox(height: 24),
-                      if (!lobbyState.isGameStarted) ...[
-                        _AudioCheckSection(sessionId: widget.sessionId),
-                        const SizedBox(height: 20),
-                      ],
-                      if (isHost) ...[
-                        // ── 플레이 영역 설정 버튼 ────────────────────────────
-                        OutlinedButton.icon(
-                          onPressed: () async {
-                            final result = await Navigator.push<dynamic>(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) => PlayableAreaPainterScreen(
-                                  sessionId: widget.sessionId,
-                                ),
-                              ),
-                            );
-                            if (result != null && mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('플레이 영역이 설정되었습니다.'),
-                                  backgroundColor: Colors.green,
-                                  duration: Duration(seconds: 2),
-                                ),
-                              );
-                            }
-                          },
-                          icon: const Icon(Icons.map_outlined),
-                          label: const Text('플레이 영역 설정'),
-                          style: OutlinedButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                          ),
+                    ] else ...[
+                      _MemberList(
+                        members: members,
+                        myUserId: myUserId,
+                        isHost: isHost,
+                        sessionId: widget.sessionId,
+                      ),
+                    ],
+                    const SizedBox(height: 16),
+                    if (isHost) ...[
+                      OutlinedButton.icon(
+                        onPressed: _openBattlefieldEditor,
+                        icon: const Icon(Icons.map_outlined),
+                        label: Text(
+                          isFantasyWars
+                              ? (layoutStatus.isReady
+                                  ? '전장 수정'
+                                  : '전장 설정')
+                              : ((session?.playableArea?.length ?? 0) >= 3
+                                  ? '플레이 구역 수정'
+                                  : '플레이 구역 설정'),
                         ),
-                        const SizedBox(height: 12),
-                        if (!canStart)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 8),
-                            child: Text(
-                              '최소 $minPlayers명 필요 (현재 $currentCount명)',
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(
-                                color: Colors.orange,
-                                fontSize: 13,
-                              ),
-                            ),
-                          ),
-                        ElevatedButton.icon(
-                          onPressed: (canStart && !_startingGame)
-                              ? () => _startGame(context)
-                              : null,
-                          icon: _startingGame
-                              ? const SizedBox(
-                                  width: 18,
-                                  height: 18,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: Colors.white,
-                                  ),
-                                )
-                              : const Icon(Icons.play_arrow),
-                          label: const Text(
-                            '게임 시작',
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          style: ElevatedButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                            backgroundColor:
-                                canStart ? Colors.green : Colors.grey,
-                            foregroundColor: Colors.white,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                          ),
+                      ),
+                      const SizedBox(height: 8),
+                      if (isFantasyWars && !layoutStatus.isReady)
+                        Text(
+                          layoutStatus.missingSummary,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(color: Colors.orange),
                         ),
-                      ] else ...[
-                        Container(
-                          padding: const EdgeInsets.all(16),
-                          decoration: BoxDecoration(
-                            color: Colors.blue.withValues(alpha: 0.08),
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(
-                              color: Colors.blue.withValues(alpha: 0.2),
-                            ),
-                          ),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              const SizedBox(
+                      if (!isFantasyWars && (session?.playableArea?.length ?? 0) < 3)
+                        const Text(
+                          '게임을 시작하기 전에 플레이 구역을 설정해주세요.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.orange),
+                        ),
+                      if (members.length < minPlayers)
+                        Text(
+                          '최소 $minPlayers명 이상 필요합니다.',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(color: Colors.orange),
+                        ),
+                      const SizedBox(height: 8),
+                      ElevatedButton.icon(
+                        onPressed: canStart && !_startingGame ? _startGame : null,
+                        icon: _startingGame
+                            ? const SizedBox(
                                 width: 18,
                                 height: 18,
                                 child: CircularProgressIndicator(strokeWidth: 2),
-                              ),
-                              const SizedBox(width: 12),
-                              Text(
-                                '방장이 게임을 시작하길 기다리는 중',
-                                style: TextStyle(
-                                  color: Colors.blue[700],
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                      const SizedBox(height: 12),
-                      OutlinedButton.icon(
-                        onPressed: session != null
-                            ? () => _shareInviteCode(session.code)
-                            : null,
-                        icon: const Icon(Icons.share),
-                        label: const Text('초대 코드 공유'),
-                        style: OutlinedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
+                              )
+                            : const Icon(Icons.play_arrow),
+                        label: Text(_startingGame ? '시작 중...' : '게임 시작'),
                       ),
-                      const SizedBox(height: 32),
-                    ],
-                  ),
+                    ] else
+                      const Text(
+                        '길드를 선택한 뒤 호스트가 게임을 시작할 때까지 기다려주세요.',
+                        textAlign: TextAlign.center,
+                      ),
+                  ],
                 ),
               ),
       ),
     );
   }
+}
 
-  Future<void> _startGame(BuildContext context) async {
-    final messenger = ScaffoldMessenger.of(context);
-    setState(() => _startingGame = true);
-    try {
-      await ref.read(lobbyProvider(widget.sessionId).notifier).startGame();
-    } catch (e) {
-      if (mounted) {
-        messenger.showSnackBar(
-          SnackBar(
-            content: Text('게임 시작 실패: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _startingGame = false);
-      }
+bool _isFantasyWars(String gameType) =>
+    gameType == 'fantasy_wars_artifact' || gameType == 'fantasy_wars';
+
+List<FantasyWarsTeamConfig> _teamConfigsFor(Session? session) {
+  if (session?.fantasyWarsTeams.isNotEmpty == true) {
+    return session!.fantasyWarsTeams;
+  }
+
+  return const [
+    FantasyWarsTeamConfig(
+      teamId: 'guild_alpha',
+      displayName: '붉은 길드',
+      color: '#DC2626',
+    ),
+    FantasyWarsTeamConfig(
+      teamId: 'guild_beta',
+      displayName: '푸른 길드',
+      color: '#2563EB',
+    ),
+    FantasyWarsTeamConfig(
+      teamId: 'guild_gamma',
+      displayName: '초록 길드',
+      color: '#16A34A',
+    ),
+  ];
+}
+
+class _FantasyWarsLayoutStatus {
+  const _FantasyWarsLayoutStatus({
+    required this.hasArea,
+    required this.controlPointCount,
+    required this.expectedControlPointCount,
+    required this.spawnZoneCount,
+    required this.expectedSpawnZoneCount,
+  });
+
+  final bool hasArea;
+  final int controlPointCount;
+  final int expectedControlPointCount;
+  final int spawnZoneCount;
+  final int expectedSpawnZoneCount;
+
+  bool get isReady =>
+      hasArea &&
+      controlPointCount == expectedControlPointCount &&
+      spawnZoneCount == expectedSpawnZoneCount;
+
+  String get missingSummary {
+    final parts = <String>[];
+    if (!hasArea) {
+      parts.add('플레이 구역');
     }
-  }
-
-  void _shareInviteCode(String code) {
-    Share.share('세션 초대 코드: $code\n앱에서 코드를 입력해 참가하세요!');
-  }
-
-  Future<void> _releaseRealtimeResources({
-    required bool notifyServer,
-  }) async {
-    try {
-      await ref
-          .read(lobbyProvider(widget.sessionId).notifier)
-          .releaseRealtimeResources(notifyServer: notifyServer);
-    } catch (e) {
-      debugPrint('[Lobby] Failed to release realtime resources: $e');
+    if (controlPointCount != expectedControlPointCount) {
+      parts.add('점령지 5개');
     }
+    if (spawnZoneCount != expectedSpawnZoneCount) {
+      parts.add('길드 시작 지점 3개');
+    }
+    return parts.isEmpty
+        ? '전장 설정이 완료되었습니다.'
+        : '아직 필요한 항목: ${parts.join(', ')}';
   }
 
-  void _confirmLeave(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('세션 나가기'),
-        content: const Text('대기실에서 나가시겠습니까?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('취소'),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              Navigator.pop(ctx);
-              final messenger = ScaffoldMessenger.of(context);
-              final router = GoRouter.of(context);
-              try {
-                await ref
-                    .read(sessionRepositoryProvider)
-                    .leaveSession(widget.sessionId);
-                await _releaseRealtimeResources(notifyServer: true);
-                await ref.read(sessionListProvider.notifier).refresh();
-                if (!mounted) return;
-                router.go('/');
-              } catch (e) {
-                messenger.showSnackBar(
-                  SnackBar(
-                    content: Text('나가기 실패: $e'),
-                    backgroundColor: Colors.red,
-                  ),
-                );
-              }
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.red,
-              foregroundColor: Colors.white,
+  static _FantasyWarsLayoutStatus fromSession(Session? session, int teamCount) {
+    final expectedControlPointCount =
+        (session?.gameConfig['controlPointCount'] as num?)?.toInt() ?? 5;
+    return _FantasyWarsLayoutStatus(
+      hasArea: (session?.playableArea?.length ?? 0) >= 3,
+      controlPointCount: session?.fantasyWarsControlPoints.length ?? 0,
+      expectedControlPointCount: expectedControlPointCount,
+      spawnZoneCount: session?.fantasyWarsSpawnZones.length ?? 0,
+      expectedSpawnZoneCount: teamCount,
+    );
+  }
+}
+
+class _SessionSummaryCard extends StatelessWidget {
+  const _SessionSummaryCard({
+    required this.session,
+    required this.countdownText,
+    required this.gameType,
+    required this.memberCount,
+  });
+
+  final Session? session;
+  final String countdownText;
+  final String gameType;
+  final int memberCount;
+
+  @override
+  Widget build(BuildContext context) {
+    final plugin = GameUiPluginRegistry.get(gameType);
+    final gameLabel = plugin?.displayName ?? gameType;
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              session?.name.isNotEmpty == true ? session!.name : '세션',
+              style: const TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
             ),
-            child: const Text('나가기'),
-          ),
-        ],
+            const SizedBox(height: 6),
+            Text('게임: $gameLabel'),
+            Text('코드: ${session?.code ?? '------'}'),
+            Text('인원: $memberCount명'),
+            Text('남은 시간: $countdownText'),
+          ],
+        ),
       ),
     );
   }
 }
 
-class _SessionInfoSection extends StatelessWidget {
-  const _SessionInfoSection({
-    required this.session,
-    required this.countdownText,
-    required this.sessionType,
-  });
+class _FantasyWarsLayoutCard extends StatelessWidget {
+  const _FantasyWarsLayoutCard({required this.status});
 
-  final Session? session;
-  final String countdownText;
-  final SessionType sessionType;
-
-  String _sessionTypeLabel() {
-    switch (sessionType) {
-      case SessionType.defaultType:
-        return '기본 위치공유';
-      case SessionType.chase:
-        return '공간 추격전';
-      case SessionType.verbal:
-        return '언어 추론';
-      case SessionType.location:
-        return '위치 탐색';
-    }
-  }
+  final _FantasyWarsLayoutStatus status;
 
   @override
   Widget build(BuildContext context) {
-    final code = session?.code ?? '------';
-    final name = session?.name ?? '로딩 중...';
-
     return Card(
-      elevation: 2,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       child: Padding(
-        padding: const EdgeInsets.all(20),
+        padding: const EdgeInsets.all(16),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              name,
-              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-              textAlign: TextAlign.center,
+            const Text(
+              '전장 설정 상태',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
             ),
-            const SizedBox(height: 4),
-            Text(
-              _sessionTypeLabel(),
-              style: TextStyle(color: Colors.grey[600], fontSize: 13),
-            ),
-            const SizedBox(height: 16),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
               children: [
-                Text(
-                  code,
-                  style: const TextStyle(
-                    fontSize: 32,
-                    fontWeight: FontWeight.bold,
-                    fontFamily: 'monospace',
-                    letterSpacing: 6,
-                  ),
+                _StatusChip(
+                  label: status.hasArea ? '플레이 구역 완료' : '플레이 구역 필요',
+                  ready: status.hasArea,
                 ),
-                const SizedBox(width: 8),
-                IconButton(
-                  icon: const Icon(Icons.copy, size: 20),
-                  tooltip: '복사',
-                  onPressed: () {
-                    Clipboard.setData(ClipboardData(text: code));
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('초대 코드가 복사되었습니다'),
-                        duration: Duration(seconds: 1),
-                      ),
-                    );
-                  },
+                _StatusChip(
+                  label:
+                      '점령지 ${status.controlPointCount}/${status.expectedControlPointCount}',
+                  ready: status.controlPointCount == status.expectedControlPointCount,
+                ),
+                _StatusChip(
+                  label:
+                      '길드 시작 지점 ${status.spawnZoneCount}/${status.expectedSpawnZoneCount}',
+                  ready: status.spawnZoneCount == status.expectedSpawnZoneCount,
                 ),
               ],
             ),
             const SizedBox(height: 12),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Icon(
-                  Icons.timer_outlined,
-                  size: 16,
-                  color: Colors.orange,
-                ),
-                const SizedBox(width: 6),
-                Text(
-                  '남은 시간: $countdownText',
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                    fontFamily: 'monospace',
-                    color: Colors.orange,
-                  ),
-                ),
-              ],
+            Text(
+              status.missingSummary,
+              style: TextStyle(
+                color: status.isReady ? Colors.green.shade700 : Colors.orange.shade800,
+                fontWeight: FontWeight.w600,
+              ),
             ),
           ],
         ),
@@ -484,42 +502,468 @@ class _SessionInfoSection extends StatelessWidget {
   }
 }
 
-class _ParticipantListSection extends ConsumerWidget {
-  const _ParticipantListSection({
+class _StatusChip extends StatelessWidget {
+  const _StatusChip({
+    required this.label,
+    required this.ready,
+  });
+
+  final String label;
+  final bool ready;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = ready ? Colors.green : Colors.orange;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withValues(alpha: 0.4)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: color.shade700,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+}
+
+class _FantasyWarsTeamBoard extends ConsumerWidget {
+  const _FantasyWarsTeamBoard({
+    required this.teams,
     required this.members,
     required this.myUserId,
     required this.isHost,
     required this.sessionId,
-    required this.speakingUserIds,
+  });
+
+  final List<FantasyWarsTeamConfig> teams;
+  final List<SessionMember> members;
+  final String myUserId;
+  final bool isHost;
+  final String sessionId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final unassignedMembers = members.where((member) {
+      return !teams.any((team) => team.teamId == member.teamId);
+    }).toList(growable: false);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          '길드',
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 8),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final cardWidth = constraints.maxWidth >= 960
+                ? (constraints.maxWidth - 24) / 3
+                : constraints.maxWidth >= 640
+                    ? (constraints.maxWidth - 12) / 2
+                    : constraints.maxWidth;
+
+            return Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                for (final team in teams)
+                  SizedBox(
+                    width: cardWidth,
+                    child: _TeamCard(
+                      team: team,
+                      members: members
+                          .where((member) => member.teamId == team.teamId)
+                          .toList(growable: false),
+                      allTeams: teams,
+                      myUserId: myUserId,
+                      isHost: isHost,
+                      sessionId: sessionId,
+                    ),
+                  ),
+                if (unassignedMembers.isNotEmpty)
+                  SizedBox(
+                    width: cardWidth,
+                    child: _UnassignedCard(
+                      members: unassignedMembers,
+                      allTeams: teams,
+                      myUserId: myUserId,
+                      isHost: isHost,
+                      sessionId: sessionId,
+                    ),
+                  ),
+              ],
+            );
+          },
+        ),
+      ],
+    );
+  }
+}
+
+class _TeamCard extends ConsumerWidget {
+  const _TeamCard({
+    required this.team,
+    required this.members,
+    required this.allTeams,
+    required this.myUserId,
+    required this.isHost,
+    required this.sessionId,
+  });
+
+  final FantasyWarsTeamConfig team;
+  final List<SessionMember> members;
+  final List<FantasyWarsTeamConfig> allTeams;
+  final String myUserId;
+  final bool isHost;
+  final String sessionId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final color = _hexToColor(team.color);
+    final myMember = members.where((member) => member.userId == myUserId).firstOrNull;
+    final canJoin = myUserId.isNotEmpty && myMember == null;
+
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: Container(
+        decoration: BoxDecoration(
+          border: Border(
+            top: BorderSide(color: color, width: 5),
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 12,
+                    height: 12,
+                    decoration: BoxDecoration(
+                      color: color,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      team.displayName,
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: color.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Text(
+                      '${members.length}',
+                      style: TextStyle(
+                        color: color,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              if (canJoin)
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton(
+                    onPressed: () => _moveMember(
+                      context,
+                      ref,
+                      userId: myUserId,
+                      teamId: team.teamId,
+                    ),
+                    child: const Text('이 길드로 이동'),
+                  ),
+                )
+              else if (myMember != null)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text(
+                    '현재 이 길드에 있습니다',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: color,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              const SizedBox(height: 12),
+              if (members.isEmpty)
+                Text(
+                  '아직 팀원이 없습니다.',
+                  style: TextStyle(color: Colors.grey.shade600),
+                )
+              else
+                ...members.map(
+                  (member) => Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: _MemberTile(
+                      member: member,
+                      myUserId: myUserId,
+                      isHost: isHost,
+                      allTeams: allTeams,
+                      sessionId: sessionId,
+                      accentColor: color,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _moveMember(
+    BuildContext context,
+    WidgetRef ref, {
+    required String userId,
+    required String teamId,
+  }) async {
+    try {
+      await ref.read(lobbyProvider(sessionId).notifier).moveMemberToTeam(userId, teamId);
+    } catch (error) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('팀 이동 실패: $error'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+}
+
+class _UnassignedCard extends StatelessWidget {
+  const _UnassignedCard({
+    required this.members,
+    required this.allTeams,
+    required this.myUserId,
+    required this.isHost,
+    required this.sessionId,
+  });
+
+  final List<SessionMember> members;
+  final List<FantasyWarsTeamConfig> allTeams;
+  final String myUserId;
+  final bool isHost;
+  final String sessionId;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '미배정',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 12),
+            ...members.map(
+              (member) => Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: _MemberTile(
+                  member: member,
+                  myUserId: myUserId,
+                  isHost: isHost,
+                  allTeams: allTeams,
+                  sessionId: sessionId,
+                  accentColor: Colors.grey.shade700,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MemberTile extends ConsumerWidget {
+  const _MemberTile({
+    required this.member,
+    required this.myUserId,
+    required this.isHost,
+    required this.allTeams,
+    required this.sessionId,
+    required this.accentColor,
+  });
+
+  final SessionMember member;
+  final String myUserId;
+  final bool isHost;
+  final List<FantasyWarsTeamConfig> allTeams;
+  final String sessionId;
+  final Color accentColor;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final isMe = member.userId == myUserId;
+    final canManage = isHost && !member.isHost;
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: accentColor.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: ListTile(
+        dense: true,
+        leading: CircleAvatar(
+          backgroundColor: accentColor.withValues(alpha: 0.16),
+          child: Text(
+            member.nickname.isNotEmpty ? member.nickname[0].toUpperCase() : '?',
+            style: TextStyle(color: accentColor),
+          ),
+        ),
+        title: Row(
+          children: [
+            Expanded(
+              child: Text(
+                '${member.nickname}${isMe ? ' (나)' : ''}',
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+            ),
+            if (member.isHost)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: Colors.blue.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: const Text(
+                  '호스트',
+                  style: TextStyle(
+                    color: Colors.blue,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+          ],
+        ),
+        subtitle: Text(member.role == 'host' ? '호스트' : '참가자'),
+        trailing: canManage
+            ? PopupMenuButton<String>(
+                onSelected: (value) => _handleAction(context, ref, value),
+                itemBuilder: (context) {
+                  return [
+                    for (final team in allTeams)
+                      if (team.teamId != member.teamId)
+                        PopupMenuItem(
+                          value: 'move:${team.teamId}',
+                          child: Text('${team.displayName}(으)로 이동'),
+                        ),
+                    const PopupMenuDivider(),
+                    const PopupMenuItem(
+                      value: 'kick',
+                      child: Text('세션에서 강퇴'),
+                    ),
+                  ];
+                },
+              )
+            : null,
+      ),
+    );
+  }
+
+  Future<void> _handleAction(BuildContext context, WidgetRef ref, String value) async {
+    if (value == 'kick') {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('참가자 강퇴'),
+          content: Text('${member.nickname}님을 이 세션에서 내보내시겠습니까?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('취소'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('강퇴'),
+            ),
+          ],
+        ),
+      );
+
+      if (confirmed != true) {
+        return;
+      }
+
+      try {
+        await ref.read(lobbyProvider(sessionId).notifier).kickMember(member.userId);
+      } catch (error) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('강퇴 실패: $error'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
+      return;
+    }
+
+    if (value.startsWith('move:')) {
+      final targetTeamId = value.substring('move:'.length);
+      try {
+        await ref
+            .read(lobbyProvider(sessionId).notifier)
+            .moveMemberToTeam(member.userId, targetTeamId);
+      } catch (error) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('팀 이동 실패: $error'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
+    }
+  }
+}
+
+class _MemberList extends ConsumerWidget {
+  const _MemberList({
+    required this.members,
+    required this.myUserId,
+    required this.isHost,
+    required this.sessionId,
   });
 
   final List<SessionMember> members;
   final String myUserId;
   final bool isHost;
   final String sessionId;
-  final Set<String> speakingUserIds;
-
-  Color _badgeColor(String role) {
-    switch (role) {
-      case 'host':
-        return const Color(0xFF2196F3);
-      case 'admin':
-        return Colors.purple;
-      default:
-        return Colors.grey;
-    }
-  }
-
-  String _badgeLabel(String role) {
-    switch (role) {
-      case 'host':
-        return '방장';
-      case 'admin':
-        return '관리자';
-      default:
-        return '멤버';
-    }
-  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -527,487 +971,56 @@ class _ParticipantListSection extends ConsumerWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text(
-          '참가자 목록',
+          '참가자',
           style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 8),
-        ...members.map((member) {
-          final isMe = member.userId == myUserId;
-          final canManage = isHost && !member.isHost;
-          final isSpeaking = speakingUserIds.contains(member.userId) ||
-              (isMe && MediaSoupAudioService().isSpeaking);
-
-          return Card(
+        ...members.map(
+          (member) => Card(
             margin: const EdgeInsets.only(bottom: 8),
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              child: Row(
-                children: [
-                  _SpeakingDot(isSpeaking: isSpeaking),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      '${member.nickname}${isMe ? ' (나)' : ''}',
-                      style: TextStyle(
-                        fontWeight: isMe ? FontWeight.bold : FontWeight.normal,
-                      ),
-                    ),
-                  ),
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: _badgeColor(member.role),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Text(
-                      _badgeLabel(member.role),
-                      style: const TextStyle(color: Colors.white, fontSize: 11),
-                    ),
-                  ),
-                  if (canManage) ...[
-                    const SizedBox(width: 4),
-                    if (member.role != 'admin')
-                      IconButton(
-                        icon: const Icon(
-                          Icons.star_border,
-                          size: 18,
-                          color: Colors.purple,
-                        ),
-                        tooltip: '관리자로 승격',
-                        visualDensity: VisualDensity.compact,
-                        onPressed: () => ref
-                            .read(lobbyProvider(sessionId).notifier)
-                            .promoteToAdmin(member.userId),
-                      ),
-                    IconButton(
-                      icon: const Icon(
-                        Icons.remove_circle_outline,
-                        size: 18,
-                        color: Colors.red,
-                      ),
-                      tooltip: '강퇴',
-                      visualDensity: VisualDensity.compact,
-                      onPressed: () => _confirmKick(context, ref, member),
-                    ),
-                  ],
-                ],
+            child: ListTile(
+              leading: CircleAvatar(
+                child: Text(
+                  member.nickname.isNotEmpty ? member.nickname[0].toUpperCase() : '?',
+                ),
               ),
+              title: Text('${member.nickname}${member.userId == myUserId ? ' (나)' : ''}'),
+              subtitle: Text(member.role == 'host' ? '호스트' : '참가자'),
+              trailing: isHost && !member.isHost
+                  ? IconButton(
+                      icon: const Icon(Icons.person_remove, color: Colors.red),
+                      onPressed: () async {
+                        try {
+                          await ref
+                              .read(lobbyProvider(sessionId).notifier)
+                              .kickMember(member.userId);
+                        } catch (error) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text('강퇴 실패: $error'),
+                                backgroundColor: Colors.red,
+                              ),
+                            );
+                          }
+                        }
+                      },
+                    )
+                  : null,
             ),
-          );
-        }),
-        const SizedBox(height: 4),
-        Text(
-          '대기 중인 플레이어 ${members.length}명',
-          style: TextStyle(color: Colors.grey[600], fontSize: 13),
+          ),
         ),
       ],
     );
   }
-
-  void _confirmKick(BuildContext context, WidgetRef ref, SessionMember member) {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('멤버 강퇴'),
-        content: Text('${member.nickname}님을 강퇴하시겠습니까?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('취소'),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              Navigator.pop(ctx);
-              try {
-                await ref
-                    .read(lobbyProvider(sessionId).notifier)
-                    .kickMember(member.userId);
-              } catch (e) {
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text('강퇴 실패: $e'),
-                      backgroundColor: Colors.red,
-                    ),
-                  );
-                }
-              }
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.red,
-              foregroundColor: Colors.white,
-            ),
-            child: const Text('강퇴'),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
-enum _CheckPhase {
-  idle,
-  checkingPermission,
-  checkingServer,
-  testingSound,
-  done,
-  failed,
+Color _hexToColor(String hex) {
+  final normalized = hex.replaceFirst('#', '');
+  final value = int.parse(normalized.length == 6 ? 'FF$normalized' : normalized, radix: 16);
+  return Color(value);
 }
 
-class _AudioCheckSection extends StatefulWidget {
-  const _AudioCheckSection({required this.sessionId});
-
-  final String sessionId;
-
-  @override
-  State<_AudioCheckSection> createState() => _AudioCheckSectionState();
-}
-
-class _AudioCheckSectionState extends State<_AudioCheckSection> {
-  _CheckPhase _phase = _CheckPhase.idle;
-  String _statusText = '게임 시작 전에 마이크 및 스피커를 미리 점검할 수 있습니다.';
-  String? _detailText;
-  final AudioPlayer _audioPlayer = AudioPlayer();
-
-  @override
-  void dispose() {
-    _audioPlayer.dispose();
-    super.dispose();
-  }
-
-  bool get _isRunning =>
-      _phase == _CheckPhase.checkingPermission ||
-      _phase == _CheckPhase.checkingServer ||
-      _phase == _CheckPhase.testingSound;
-
-  String get _phaseLabel => switch (_phase) {
-        _CheckPhase.checkingPermission => '마이크 권한 확인 중',
-        _CheckPhase.checkingServer => '미디어 서버 연결 확인 중',
-        _CheckPhase.testingSound => '스피커 출력 테스트 중',
-        _ => '',
-      };
-
-  Color get _statusColor => switch (_phase) {
-        _CheckPhase.done => Colors.green[700]!,
-        _CheckPhase.failed => Colors.red[700]!,
-        _ => Colors.blue[700]!,
-      };
-
-  Future<void> _runCheck() async {
-    if (_isRunning) return;
-
-    _setPhase(_CheckPhase.checkingPermission, '마이크 권한을 확인하는 중입니다.');
-
-    final permissionStatus = await Permission.microphone.request();
-    if (!permissionStatus.isGranted) {
-      _setPhase(
-        _CheckPhase.failed,
-        '마이크 권한이 거부되었습니다.',
-        detail: '기기 설정에서 마이크 권한을 허용한 후 다시 시도해 주세요.',
-      );
-      return;
-    }
-
-    _setPhase(_CheckPhase.checkingServer, '미디어 서버에 연결하는 중입니다.');
-
-    try {
-      await MediaSoupAudioService().ensureJoined(widget.sessionId);
-    } catch (e) {
-      _setPhase(
-        _CheckPhase.failed,
-        '미디어 서버 연결에 실패하였습니다.',
-        detail: e.toString().replaceFirst(RegExp(r'^StateError: '), ''),
-      );
-      return;
-    }
-
-    _setPhase(
-      _CheckPhase.testingSound,
-      '스피커 출력을 테스트하는 중입니다. 소리가 들리면 정상입니다.',
-    );
-
-    try {
-      await _audioPlayer.play(AssetSource('sounds/emergency.mp3'));
-      await _audioPlayer.onPlayerComplete.first
-          .timeout(const Duration(seconds: 8));
-    } catch (_) {
-      _setPhase(
-        _CheckPhase.done,
-        '마이크 연결은 정상입니다. 테스트 사운드 재생에 실패하였습니다.',
-        detail: '기기 볼륨 및 사운드 설정을 확인해 주세요.',
-      );
-      return;
-    }
-
-    _setPhase(
-      _CheckPhase.done,
-      '마이크 연결 및 스피커 출력이 정상적으로 확인되었습니다.',
-    );
-  }
-
-  void _setPhase(_CheckPhase phase, String status, {String? detail}) {
-    if (!mounted) return;
-    setState(() {
-      _phase = phase;
-      _statusText = status;
-      _detailText = detail;
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      elevation: 1,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Text(
-              '오디오 및 마이크 점검',
-              style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 10),
-            Text(
-              _statusText,
-              style: TextStyle(fontSize: 13, color: _statusColor),
-            ),
-            if (_detailText != null) ...[
-              const SizedBox(height: 4),
-              Text(
-                _detailText!,
-                style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-              ),
-            ],
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                if (_isRunning) ...[
-                  const SizedBox(
-                    width: 15,
-                    height: 15,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      _phaseLabel,
-                      style: const TextStyle(fontSize: 12),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ] else
-                  const Spacer(),
-                ElevatedButton(
-                  onPressed: _isRunning ? null : _runCheck,
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 10,
-                    ),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                  ),
-                  child: Text(
-                    _phase == _CheckPhase.idle ? '점검 시작' : '다시 점검',
-                    style: const TextStyle(fontSize: 13),
-                  ),
-                ),
-              ],
-            ),
-            // ── 점검 완료 후: 마이크 컨트롤 영역 ─────────────────────────
-            if (_phase == _CheckPhase.done) ...[
-              const SizedBox(height: 14),
-              const Divider(height: 1),
-              const SizedBox(height: 14),
-              Row(
-                children: [
-                  // 마이크 음소거 토글
-                  _MicToggleButton(sessionId: widget.sessionId),
-                  const SizedBox(width: 16),
-                  // 로컬 speaking 인디케이터
-                  StreamBuilder<bool>(
-                    stream: MediaSoupAudioService().isSpeakingStream,
-                    initialData: false,
-                    builder: (context, snap) {
-                      final speaking = snap.data ?? false;
-                      return AnimatedContainer(
-                        duration: const Duration(milliseconds: 150),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 6,
-                        ),
-                        decoration: BoxDecoration(
-                          color: speaking
-                              ? Colors.green.withValues(alpha: 0.12)
-                              : Colors.grey.withValues(alpha: 0.08),
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(
-                            color: speaking
-                                ? Colors.green.shade400
-                                : Colors.grey.shade300,
-                          ),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              speaking
-                                  ? Icons.mic_rounded
-                                  : Icons.mic_none_rounded,
-                              size: 16,
-                              color: speaking
-                                  ? Colors.green.shade700
-                                  : Colors.grey.shade500,
-                            ),
-                            const SizedBox(width: 6),
-                            Text(
-                              speaking ? '말하는 중...' : '대기 중',
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                                color: speaking
-                                    ? Colors.green.shade700
-                                    : Colors.grey.shade600,
-                              ),
-                            ),
-                          ],
-                        ),
-                      );
-                    },
-                  ),
-                ],
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ── 말하는 중 점 인디케이터 ──────────────────────────────────────────────────
-class _SpeakingDot extends StatefulWidget {
-  const _SpeakingDot({required this.isSpeaking});
-  final bool isSpeaking;
-
-  @override
-  State<_SpeakingDot> createState() => _SpeakingDotState();
-}
-
-class _SpeakingDotState extends State<_SpeakingDot>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _ctrl;
-  late final Animation<double> _scale;
-
-  @override
-  void initState() {
-    super.initState();
-    _ctrl = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 600),
-    )..repeat(reverse: true);
-    _scale = Tween<double>(begin: 0.7, end: 1.0).animate(
-      CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut),
-    );
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (!widget.isSpeaking) {
-      return Container(
-        width: 10,
-        height: 10,
-        decoration: const BoxDecoration(
-          color: Colors.green,
-          shape: BoxShape.circle,
-        ),
-      );
-    }
-
-    return ScaleTransition(
-      scale: _scale,
-      child: Container(
-        width: 14,
-        height: 14,
-        decoration: BoxDecoration(
-          color: Colors.green.shade500,
-          shape: BoxShape.circle,
-          boxShadow: [
-            BoxShadow(
-              color: Colors.green.withValues(alpha: 0.5),
-              blurRadius: 6,
-              spreadRadius: 2,
-            ),
-          ],
-        ),
-        child: const Icon(Icons.mic_rounded, size: 9, color: Colors.white),
-      ),
-    );
-  }
-}
-
-// ── 마이크 음소거 토글 버튼 ────────────────────────────────────────────────
-class _MicToggleButton extends StatefulWidget {
-  const _MicToggleButton({required this.sessionId});
-  final String sessionId;
-
-  @override
-  State<_MicToggleButton> createState() => _MicToggleButtonState();
-}
-
-class _MicToggleButtonState extends State<_MicToggleButton> {
-  bool _isMuted = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _isMuted = MediaSoupAudioService().isMuted;
-  }
-
-  Future<void> _toggle() async {
-    await MediaSoupAudioService().toggleMute();
-    if (!mounted) return;
-    setState(() {
-      _isMuted = MediaSoupAudioService().isMuted;
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: _toggle,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        width: 52,
-        height: 52,
-        decoration: BoxDecoration(
-          color: _isMuted
-              ? Colors.red.withValues(alpha: 0.1)
-              : Colors.green.withValues(alpha: 0.1),
-          shape: BoxShape.circle,
-          border: Border.all(
-            color: _isMuted ? Colors.red.shade400 : Colors.green.shade400,
-            width: 2,
-          ),
-        ),
-        child: Icon(
-          _isMuted ? Icons.mic_off_rounded : Icons.mic_rounded,
-          color: _isMuted ? Colors.red.shade600 : Colors.green.shade600,
-          size: 26,
-        ),
-      ),
-    );
-  }
+extension<T> on Iterable<T> {
+  T? get firstOrNull => isEmpty ? null : first;
 }

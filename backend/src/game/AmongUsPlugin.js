@@ -11,6 +11,17 @@ const AmongUsPlugin = {
     killDistance:   { type: 'number', default: 3, min: 1, max: 10 },
   },
 
+  defaultConfig: {
+    impostorCount:  1,
+    killCooldown:   30,
+    discussionTime: 90,
+    voteTime:       30,
+    missionPerCrew: 3,
+    killDistance:   3,
+  },
+
+  capabilities: ['kill', 'vote', 'mission', 'proximity', 'item'],
+
   requiredModules: ['proximity', 'vote', 'mission', 'item'],
 
   assignRoles(members, config) {

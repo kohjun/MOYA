@@ -51,7 +51,9 @@ export const startSessionCleaner = (io) => {
         // 단일 키 삭제
         await delCache(`session:${sessionId}`);
         await delCache(`session:code:${sessionCode}`);
-        await delCache(`game:${sessionId}`);
+        await delCache(`game:${sessionId}`);          // 레거시 key
+        await delCache(`game:state:${sessionId}`);    // 신규 key
+        await delCache(`game:started:${sessionId}`);  // 신규 key
         
         // 패턴 키 일괄 삭제 (기존 위치 캐시 + 신규 게임 모듈 캐시들)
         const patternsToDelete = [

@@ -1,4 +1,4 @@
-// lib/features/home/presentation/home_screen.dart
+﻿// lib/features/home/presentation/home_screen.dart
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -12,7 +12,7 @@ import '../data/session_repository.dart';
 class HomeScreen extends ConsumerWidget {
   const HomeScreen({super.key});
 
-  // ── 이미 참여 중인 세션이 있는지 확인하는 헬퍼 메서드 ────────────────────────
+ 
   bool _hasActiveSession(BuildContext context, WidgetRef ref) {
     final sessions = ref.read(sessionListProvider).valueOrNull ?? [];
     if (sessions.isNotEmpty) {
@@ -20,7 +20,7 @@ class HomeScreen extends ConsumerWidget {
         context: context,
         builder: (ctx) => AlertDialog(
           title: const Text('입장 불가'),
-          content: const Text('이미 참여 중인 세션이 있습니다. 기존 세션을 완전히 종료하거나 나간 후 새로운 세션에 참여해주세요.'),
+          content: const Text('이미 참여 중인 세션이 있습니다. 기존 세션을 나가거나 종료한 뒤 새 세션에 참여해주세요.'),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx),
@@ -29,9 +29,9 @@ class HomeScreen extends ConsumerWidget {
           ],
         ),
       );
-      return true; // 활성 세션 있음
+      return true; 
     }
-    return false; // 활성 세션 없음
+    return false; 
   }
 
   @override
@@ -40,7 +40,7 @@ class HomeScreen extends ConsumerWidget {
     final sessionState = ref.watch(sessionListProvider);
     final user         = authState.valueOrNull;
 
-    // 참여 중인 세션이 있는지 여부 (FAB 숨김 처리에 사용)
+
     final hasSession = (sessionState.valueOrNull?.isNotEmpty ?? false);
 
     return Scaffold(
@@ -48,7 +48,7 @@ class HomeScreen extends ConsumerWidget {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('내 세션', style: TextStyle(fontWeight: FontWeight.bold)),
+            const Text('세션 목록', style: TextStyle(fontWeight: FontWeight.bold)),
             if (user != null)
               Text(
                 user.nickname,
@@ -66,6 +66,11 @@ class HomeScreen extends ConsumerWidget {
             icon: const Icon(Icons.settings_outlined),
             tooltip: '설정',
             onPressed: () => context.push(AppRoutes.settings),
+          ),
+          IconButton(
+            icon: const Icon(Icons.logout),
+            tooltip: '로그아웃',
+            onPressed: () => _confirmLogout(context, ref),
           ),
         ],
       ),
@@ -92,12 +97,9 @@ class HomeScreen extends ConsumerWidget {
                     onTap: () {
                       final s = sessions[index];
                       if (s.gameStatus == 'playing') {
-                        // 게임 진행 중인 세션은 맵으로 직접 이동
-                        context.push('/game/${s.id}?type=${s.sessionType.name}');
+                        context.push('/game/${s.id}?gameType=${s.gameType}');
                       } else {
-                        context.push(
-                          '/lobby/${s.id}?sessionType=${s.sessionType.name}',
-                        );
+                        context.push('/lobby/${s.id}?gameType=${s.gameType}');
                       }
                     },
                     onLeave: () => _confirmLeave(context, ref, sessions[index]),
@@ -106,7 +108,7 @@ class HomeScreen extends ConsumerWidget {
               ),
       ),
 
-      // 1인 1방 규칙: 세션이 이미 존재하면 플로팅 버튼 숨김
+    
       floatingActionButton: hasSession 
           ? null 
           : Column(
@@ -132,17 +134,14 @@ class HomeScreen extends ConsumerWidget {
     );
   }
 
-  // ── 세션 생성 다이얼로그 (유지 시간 선택 추가) ──────────────────────────────
+  
   void _showCreateDialog(BuildContext context, WidgetRef ref) {
     if (_hasActiveSession(context, ref)) return;
 
     final ctrl = TextEditingController();
     int selectedHours = 1;
-    double maxMembers = 3; // 최대 인원 기본값 3명
-    SessionType selectedType = SessionType.defaultType;
-    // [Task 5] 게임 설정
-    double killCooldown = 30;        // 10 ~ 60 초
-    double emergencyCooldown = 90;   // 30 ~ 180 초
+    double maxMembers = 3;
+    String selectedGameType = _kGameCatalog.first.gameType;
 
     final Map<int, String> durationOptions = {
       1: '1시간 (기본)',
@@ -170,54 +169,44 @@ class HomeScreen extends ConsumerWidget {
                     maxLength: 30,
                     decoration: const InputDecoration(
                       labelText: '세션 이름',
-                      hintText: '예: MOYA 세션',
+                      hintText: '예: MOYA 판타지 워즈',
                     ),
                   ),
                   const SizedBox(height: 16),
                   DropdownButtonFormField<int>(
                     initialValue: selectedHours,
                     isExpanded: true,
-                    decoration: const InputDecoration(
-                      labelText: '세션 유지 시간',
-                    ),
-                    items: durationOptions.entries.map((entry) {
-                      return DropdownMenuItem<int>(
-                        value: entry.key,
-                        child: Text(entry.value),
-                      );
-                    }).toList(),
-                    onChanged: (int? newValue) {
-                      if (newValue != null) {
-                        setDialogState(() {
-                          selectedHours = newValue;
-                        });
-                      }
+                    decoration: const InputDecoration(labelText: '세션 유지 시간'),
+                    items: durationOptions.entries
+                        .map((e) => DropdownMenuItem<int>(
+                              value: e.key,
+                              child: Text(e.value),
+                            ))
+                        .toList(),
+                    onChanged: (v) {
+                      if (v != null) setDialogState(() => selectedHours = v);
                     },
                   ),
                   const SizedBox(height: 24),
-                  
-                  // 최대 인원 설정
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Text('최대 인원', style: TextStyle(fontWeight: FontWeight.bold)),
-                      Text(
-                        '${maxMembers.toInt()}명',
-                        style: const TextStyle(color: Colors.blue, fontWeight: FontWeight.bold),
-                      ),
+                      const Text('최대 인원',
+                          style: TextStyle(fontWeight: FontWeight.bold)),
+                      Text('${maxMembers.toInt()}명',
+                          style: const TextStyle(
+                              color: Colors.blue,
+                              fontWeight: FontWeight.bold)),
                     ],
                   ),
                   Slider(
                     value: maxMembers,
                     min: 3,
                     max: 20,
-                    divisions: 17, // 3부터 20까지 17칸
+                    divisions: 17,
                     label: '${maxMembers.toInt()}명',
-                    onChanged: (value) {
-                      setDialogState(() {
-                        maxMembers = value;
-                      });
-                    },
+                    onChanged: (v) =>
+                        setDialogState(() => maxMembers = v),
                   ),
                   const Text(
                     '최소 3명에서 최대 20명까지 설정할 수 있습니다.',
@@ -225,89 +214,16 @@ class HomeScreen extends ConsumerWidget {
                   ),
                   const SizedBox(height: 24),
 
-                  // 세션 타입 선택
-                  const Text('세션 타입', style: TextStyle(fontWeight: FontWeight.bold)),
+              
+                  const Text('게임 선택',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
                   const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      _TypeCard(
-                        icon: Icons.location_on,
-                        label: '기본\n위치공유',
-                        type: SessionType.defaultType,
-                        selected: selectedType == SessionType.defaultType,
-                        onTap: () => setDialogState(() => selectedType = SessionType.defaultType),
-                      ),
-                      const SizedBox(width: 8),
-                      _TypeCard(
-                        icon: Icons.directions_run,
-                        label: '공간\n추격전',
-                        type: SessionType.chase,
-                        selected: selectedType == SessionType.chase,
-                        onTap: () => setDialogState(() => selectedType = SessionType.chase),
-                      ),
-                      const SizedBox(width: 8),
-                      _TypeCard(
-                        icon: Icons.record_voice_over,
-                        label: '언어\n추론',
-                        type: SessionType.verbal,
-                        selected: selectedType == SessionType.verbal,
-                        onTap: () => setDialogState(() => selectedType = SessionType.verbal),
-                      ),
-                      const SizedBox(width: 8),
-                      _TypeCard(
-                        icon: Icons.explore,
-                        label: '위치\n탐색',
-                        type: SessionType.location,
-                        selected: selectedType == SessionType.location,
-                        onTap: () => setDialogState(() => selectedType = SessionType.location),
-                      ),
-                    ],
-                  ),
-
-                  // ── [Task 5] 게임 설정 (verbal / chase 전용) ──────────────
-                  if (selectedType == SessionType.verbal || selectedType == SessionType.chase) ...[
-                    const SizedBox(height: 24),
-                    const Text('게임 설정', style: TextStyle(fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 12),
-
-                    // 킬 쿨타임
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text('킬 쿨타임', style: TextStyle(fontSize: 13)),
-                        Text('${killCooldown.toInt()}초',
-                          style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 13)),
-                      ],
-                    ),
-                    Slider(
-                      value: killCooldown,
-                      min: 10, max: 60,
-                      divisions: 10,
-                      activeColor: Colors.red,
-                      label: '${killCooldown.toInt()}초',
-                      onChanged: (v) => setDialogState(() => killCooldown = v),
-                    ),
-
-                    // 긴급회의 쿨타임 (verbal 전용)
-                    if (selectedType == SessionType.verbal) ...[
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          const Text('긴급회의 쿨타임', style: TextStyle(fontSize: 13)),
-                          Text('${emergencyCooldown.toInt()}초',
-                            style: const TextStyle(color: Colors.orange, fontWeight: FontWeight.bold, fontSize: 13)),
-                        ],
-                      ),
-                      Slider(
-                        value: emergencyCooldown,
-                        min: 30, max: 180,
-                        divisions: 15,
-                        activeColor: Colors.orange,
-                        label: '${emergencyCooldown.toInt()}초',
-                        onChanged: (v) => setDialogState(() => emergencyCooldown = v),
-                      ),
-                    ],
-                  ],
+                  ..._kGameCatalog.map((game) => _GameCatalogCard(
+                        info: game,
+                        selected: selectedGameType == game.gameType,
+                        onTap: () => setDialogState(
+                            () => selectedGameType = game.gameType),
+                      )),
                 ],
               ),
             ),
@@ -323,24 +239,25 @@ class HomeScreen extends ConsumerWidget {
                   Navigator.pop(ctx);
 
                   try {
-                    final session = await ref.read(sessionListProvider.notifier).createSession(
-                      name,
-                      durationHours: selectedHours,
-                      maxMembers: maxMembers.toInt(),
-                      activeModules: selectedType.toModules(),
-                      killCooldown: killCooldown.toInt(),
-                      emergencyCooldown: emergencyCooldown.toInt(),
-                    );
+                    final session = await ref
+                        .read(sessionListProvider.notifier)
+                        .createSession(
+                          name,
+                          durationHours: selectedHours,
+                          maxMembers: maxMembers.toInt(),
+                          gameType: selectedGameType,
+                        );
 
                     if (context.mounted) {
                       context.push(
-                        '/lobby/${session.id}?sessionType=${selectedType.name}',
-                      );
+                          '/lobby/${session.id}?gameType=${session.gameType}');
                     }
                   } catch (e) {
                     if (context.mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text('세션 생성 실패: $e'), backgroundColor: Colors.red),
+                        SnackBar(
+                            content: Text('세션 생성 실패: $e'),
+                            backgroundColor: Colors.red),
                       );
                     }
                   }
@@ -354,7 +271,7 @@ class HomeScreen extends ConsumerWidget {
     );
   }
 
-  // ── 초대 코드로 참가 다이얼로그 ──────────────────────────────────────────
+ 
   void _showJoinDialog(BuildContext context, WidgetRef ref) {
     if (_hasActiveSession(context, ref)) return;
 
@@ -389,9 +306,7 @@ class HomeScreen extends ConsumerWidget {
               try {
                 final session = await ref.read(sessionListProvider.notifier).joinSession(code);
                 if (context.mounted) {
-                  context.push(
-                    '/lobby/${session.id}?sessionType=${session.sessionType.name}',
-                  );
+                  context.push('/lobby/${session.id}?gameType=${session.gameType}');
                 }
               } catch (e) {
                 if (context.mounted) {
@@ -408,8 +323,7 @@ class HomeScreen extends ConsumerWidget {
     );
   }
 
-  // ── 로그아웃 확인 ─────────────────────────────────────────────────────────
-  // ignore: unused_element
+ 
   void _confirmLogout(BuildContext context, WidgetRef ref) {
     showDialog(
       context: context,
@@ -434,7 +348,7 @@ class HomeScreen extends ConsumerWidget {
     );
   }
 
-  // ── 세션 나가기 확인 ──────────────────────────────────────────────────────
+  // ?? ?몄뀡 ?섍?湲??뺤씤 ??????????????????????????????????????????????????????
   void _confirmLeave(BuildContext context, WidgetRef ref, Session session) {
     showDialog(
       context: context,
@@ -468,9 +382,7 @@ class HomeScreen extends ConsumerWidget {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 세션 카드
-// ─────────────────────────────────────────────────────────────────────────────
+
 
 class _SessionCard extends StatefulWidget {
   const _SessionCard({
@@ -488,7 +400,7 @@ class _SessionCard extends StatefulWidget {
 }
 
 class _SessionCardState extends State<_SessionCard> {
-  // 남은 시간을 계산하는 헬퍼 함수
+  
   String _getRemainingTime(DateTime? expiresAt) {
     if (expiresAt == null) return '만료 시간 없음';
     
@@ -515,12 +427,12 @@ class _SessionCardState extends State<_SessionCard> {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       child: InkWell(
         borderRadius: BorderRadius.circular(16),
-        // ★ 수정됨: 만료된 방이면 탭(입장)을 막고 스낵바를 띄움
+     
         onTap: isExpired 
             ? () {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(
-                    content: Text('만료된 세션입니다. 잠시 후 완전히 종료됩니다.'),
+                    content: Text('만료된 세션입니다. 새로고침 후 다시 확인해주세요.'),
                     backgroundColor: Colors.grey,
                     duration: Duration(seconds: 2),
                   ),
@@ -534,7 +446,7 @@ class _SessionCardState extends State<_SessionCard> {
             children: [
               Row(
                 children: [
-                  // 세션 아이콘 (기본 마커 아이콘)
+                  // ?몄뀡 ?꾩씠肄?(湲곕낯 留덉빱 ?꾩씠肄?
                   Container(
                     width: 44,
                     height: 44,
@@ -546,7 +458,7 @@ class _SessionCardState extends State<_SessionCard> {
                   ),
                   const SizedBox(width: 12),
 
-                  // 세션 이름 + 뱃지 + 남은 시간
+           
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -589,7 +501,7 @@ class _SessionCardState extends State<_SessionCard> {
                                 borderRadius: BorderRadius.circular(20),
                               ),
                               child: Text(
-                                session.gameStatus == 'playing' ? '진행중' : '대기중',
+                                session.gameStatus == 'playing' ? '플레이 중' : '로비',
                                 style: const TextStyle(
                                     color: Colors.white, fontSize: 11),
                               ),
@@ -599,7 +511,7 @@ class _SessionCardState extends State<_SessionCard> {
                         const SizedBox(height: 6),
                         Row(
                           children: [
-                            // 인원수 표시
+                           
                             const Icon(Icons.people_outlined, size: 14, color: Colors.grey),
                             const SizedBox(width: 4),
                             Text(
@@ -609,7 +521,7 @@ class _SessionCardState extends State<_SessionCard> {
                             
                             const SizedBox(width: 12),
                             
-                            // 남은 시간 표시 (만료되었으면 빨간색, 아니면 주황색)
+                           
                             Icon(
                               Icons.timer_outlined, 
                               size: 14, 
@@ -629,8 +541,7 @@ class _SessionCardState extends State<_SessionCard> {
                       ],
                     ),
                   ),
-
-                  // 초대 코드 + 나가기 버튼
+                
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
@@ -640,7 +551,7 @@ class _SessionCardState extends State<_SessionCard> {
                             Clipboard.setData(ClipboardData(text: session.code));
                             ScaffoldMessenger.of(context).showSnackBar(
                               const SnackBar(
-                                content: Text('코드가 복사되었습니다'),
+                                content: Text('초대 코드가 복사되었습니다.'),
                                 duration: Duration(seconds: 1),
                               ),
                             );
@@ -672,7 +583,7 @@ class _SessionCardState extends State<_SessionCard> {
                       IconButton(
                         icon: const Icon(Icons.exit_to_app,
                             size: 20, color: Colors.red),
-                        tooltip: '나가기',
+                        tooltip: '세션 나가기',
                         onPressed: widget.onLeave,
                         visualDensity: VisualDensity.compact,
                       ),
@@ -688,68 +599,101 @@ class _SessionCardState extends State<_SessionCard> {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 세션 타입 선택 카드
-// ─────────────────────────────────────────────────────────────────────────────
 
-class _TypeCard extends StatelessWidget {
-  const _TypeCard({
+class _GameInfo {
+  const _GameInfo({
+    required this.gameType,
+    required this.displayName,
+    required this.description,
     required this.icon,
-    required this.label,
-    required this.type,
+    required this.color,
+  });
+  final String   gameType;
+  final String   displayName;
+  final String   description;
+  final IconData icon;
+  final Color    color;
+}
+
+const List<_GameInfo> _kGameCatalog = [
+  _GameInfo(
+    gameType:    'fantasy_wars_artifact',
+    displayName: '판타지 워즈: 성유물 쟁탈전',
+    description: '전장을 설정하고 세 길드로 나뉘어 다섯 거점을 두고 경쟁합니다.',
+    icon:        Icons.castle,
+    color:       Color(0xFF7B2FBE),
+  ),
+];
+
+class _GameCatalogCard extends StatelessWidget {
+  const _GameCatalogCard({
+    required this.info,
     required this.selected,
     required this.onTap,
   });
 
-  final IconData      icon;
-  final String        label;
-  final SessionType   type;
-  final bool          selected;
-  final VoidCallback  onTap;
+  final _GameInfo    info;
+  final bool         selected;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    final color = Theme.of(context).colorScheme.primary;
-    return Expanded(
-      child: GestureDetector(
-        onTap: onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 150),
-          padding: const EdgeInsets.symmetric(vertical: 10),
-          decoration: BoxDecoration(
-            color: selected ? color.withValues(alpha: 0.12) : Colors.grey[100],
-            border: Border.all(
-              color: selected ? color : Colors.grey[300]!,
-              width: selected ? 2 : 1,
-            ),
-            borderRadius: BorderRadius.circular(12),
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: selected
+              ? info.color.withValues(alpha: 0.10)
+              : Colors.grey[50],
+          border: Border.all(
+            color: selected ? info.color : Colors.grey[300]!,
+            width: selected ? 2 : 1,
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, color: selected ? color : Colors.grey[500], size: 24),
-              const SizedBox(height: 4),
-              Text(
-                label,
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: selected ? FontWeight.bold : FontWeight.normal,
-                  color: selected ? color : Colors.grey[600],
-                  height: 1.3,
-                ),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: info.color.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(10),
               ),
-            ],
-          ),
+              child: Icon(info.icon, color: info.color, size: 24),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    info.displayName,
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: selected ? info.color : null,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    info.description,
+                    style: const TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                ],
+              ),
+            ),
+            if (selected)
+              Icon(Icons.check_circle, color: info.color, size: 20),
+          ],
         ),
       ),
     );
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 빈 상태 뷰
-// ─────────────────────────────────────────────────────────────────────────────
 
 class _EmptyView extends StatelessWidget {
   const _EmptyView({
@@ -769,7 +713,7 @@ class _EmptyView extends StatelessWidget {
           Icon(Icons.location_off, size: 80, color: Colors.grey[300]),
           const SizedBox(height: 16),
           Text(
-            '참가 중인 세션이 없습니다',
+            '참여 중인 세션이 없습니다',
             style: TextStyle(color: Colors.grey[600], fontSize: 16),
           ),
           const SizedBox(height: 32),
@@ -782,7 +726,7 @@ class _EmptyView extends StatelessWidget {
           ElevatedButton.icon(
             onPressed: onCreateSession,
             icon: const Icon(Icons.add),
-            label: const Text('새 세션 만들기'),
+            label: const Text('세션 생성'),
           ),
         ],
       ),
@@ -790,9 +734,7 @@ class _EmptyView extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 에러 뷰
-// ─────────────────────────────────────────────────────────────────────────────
+
 
 class _ErrorView extends StatelessWidget {
   const _ErrorView({required this.message, required this.onRetry});
@@ -820,3 +762,4 @@ class _ErrorView extends StatelessWidget {
     );
   }
 }
+

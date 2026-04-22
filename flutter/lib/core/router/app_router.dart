@@ -8,17 +8,15 @@ import '../../features/auth/data/auth_repository.dart';
 import '../../features/auth/presentation/login_screen.dart';
 import '../../features/auth/presentation/register_screen.dart';
 import '../../features/home/presentation/home_screen.dart';
-import '../../features/map/presentation/map_screen.dart';
 import '../../features/history/presentation/history_screen.dart';
 import '../../features/geofence/presentation/geofence_screen.dart';
 import '../../features/settings/presentation/settings_screen.dart';
 import '../../features/session/presentation/member_management_screen.dart';
-import '../../features/game/presentation/game_main_screen.dart';
 import '../../features/game/presentation/game_role_screen.dart';
 import '../../features/game/presentation/game_result_screen.dart';
+import '../../features/game/presentation/game_shell_screen.dart';
 import '../../features/game/presentation/session_info_screen.dart';
 import '../../features/lobby/presentation/lobby_screen.dart';
-import '../../features/home/data/session_repository.dart';
 
 // 라우트 경로 상수
 abstract class AppRoutes {
@@ -69,38 +67,24 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: AppRoutes.lobby,
         builder: (context, state) {
           final sessionId = state.pathParameters['sessionId']!;
-          final sessionTypeStr =
-              state.uri.queryParameters['sessionType'] ?? 'defaultType';
-          final sessionType = SessionType.values.firstWhere(
-            (t) => t.name == sessionTypeStr,
-            orElse: () => SessionType.defaultType,
-          );
-          return LobbyScreen(
-            sessionId: sessionId,
-            sessionType: sessionType,
-          );
+          final gameType = state.uri.queryParameters['gameType'];
+          return LobbyScreen(sessionId: sessionId, gameType: gameType);
         },
       ),
       GoRoute(
         path: AppRoutes.game,
         builder: (context, state) {
           final sessionId = state.pathParameters['sessionId']!;
-          final typeStr = state.uri.queryParameters['type'] ?? 'defaultType';
-          final sessionType = SessionType.values.firstWhere(
-            (value) => value.name == typeStr,
-            orElse: () => SessionType.defaultType,
-          );
-          return GameMainScreen(
-            sessionId: sessionId,
-            sessionType: sessionType,
-          );
+          final gameType = state.uri.queryParameters['gameType'];
+          return GameShellScreen(sessionId: sessionId, gameType: gameType);
         },
       ),
       GoRoute(
         path: AppRoutes.map,
         builder: (context, state) {
           final sessionId = state.pathParameters['sessionId']!;
-          return MapScreen(sessionId: sessionId);
+          final gameType = state.uri.queryParameters['gameType'];
+          return GameShellScreen(sessionId: sessionId, gameType: gameType);
         },
       ),
       GoRoute(
@@ -135,21 +119,12 @@ final routerProvider = Provider<GoRouter>((ref) {
           return GameRoleScreen(sessionId: sessionId);
         },
       ),
-      // ← 뒤로가기 버튼 → 세션 정보 화면
       GoRoute(
         path: '/game/:sessionId/session-info',
         builder: (context, state) {
           final sessionId = state.pathParameters['sessionId']!;
-          final typeStr =
-              state.uri.queryParameters['type'] ?? 'defaultType';
-          final sessionType = SessionType.values.firstWhere(
-            (v) => v.name == typeStr,
-            orElse: () => SessionType.defaultType,
-          );
-          return SessionInfoScreen(
-            sessionId: sessionId,
-            sessionType: sessionType,
-          );
+          final gameType = state.uri.queryParameters['gameType'];
+          return SessionInfoScreen(sessionId: sessionId, gameType: gameType);
         },
       ),
       GoRoute(

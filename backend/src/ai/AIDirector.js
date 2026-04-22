@@ -1,7 +1,7 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 import { chat } from './LLMClient.js';
-import { SYSTEM_PROMPT, PROMPTS } from './prompt.js';
+import { SYSTEM_PROMPT, PROMPTS, FW_SYSTEM_PROMPT, FW_PROMPTS } from './prompt.js';
 import { retrieve } from './rag/ragRetriever.js';
 import { GamePluginRegistry } from '../game/index.js';
 import { redisClient } from '../config/redis.js';
@@ -231,10 +231,13 @@ async function onGameStart(room) {
       (player) => player.team === 'impostor',
     ).length;
 
+  // 한국어 3문장(최대 120자)이 중간에 잘리지 않도록 maxTokens를 넉넉히 설정.
+  // Gemini 기본 500 → 한국어 토큰 밀도 특성상 가끔 잘리는 이슈 방지.
   return chat({
     prompt: PROMPTS.gameStart(playerCount, impostorCount),
     systemPrompt: SYSTEM_PROMPT,
     model: 'fast',
+    maxTokens: 1024,
   });
 }
 
@@ -313,6 +316,74 @@ async function onGameEnd(room, result) {
   return chat({ prompt, systemPrompt: SYSTEM_PROMPT, model: 'fast' });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Fantasy Wars 이벤트 핸들러
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function fwOnGameStart(room) {
+  const guildCount  = room.pluginState?.guilds ? Object.keys(room.pluginState.guilds).length : 3;
+  const playerCount = room.alivePlayerIds?.length ?? 0;
+  return chat({
+    prompt: FW_PROMPTS.gameStart(guildCount, playerCount),
+    systemPrompt: FW_SYSTEM_PROMPT,
+    model: 'fast',
+    maxTokens: 1024,
+  });
+}
+
+async function fwOnCpCaptured(room, guildId, cpName) {
+  if (await isOnCooldown(`${room.roomId}_cp`, 4000)) return null;
+  const cps        = room.pluginState?.controlPoints ?? [];
+  const captured   = cps.filter(cp => cp.capturedBy === guildId).length;
+  return chat({
+    prompt: FW_PROMPTS.cpCaptured(guildId, cpName, captured, cps.length),
+    systemPrompt: FW_SYSTEM_PROMPT,
+    model: 'fast',
+  });
+}
+
+async function fwOnDuelResult(room, winner, loser, minigameType, executionTriggered) {
+  if (await isOnCooldown(`${room.roomId}_duel`, 3000)) return null;
+  return chat({
+    prompt: FW_PROMPTS.duelResult(
+      winner?.nickname ?? winner?.userId ?? '?',
+      loser?.nickname  ?? loser?.userId  ?? '?',
+      minigameType,
+      executionTriggered,
+    ),
+    systemPrompt: FW_SYSTEM_PROMPT,
+    model: 'fast',
+  });
+}
+
+async function fwOnDuelDraw(room, minigameType) {
+  return chat({
+    prompt: FW_PROMPTS.duelDraw(minigameType),
+    systemPrompt: FW_SYSTEM_PROMPT,
+    model: 'fast',
+  });
+}
+
+async function fwOnPlayerEliminated(room, player) {
+  if (await isOnCooldown(`${room.roomId}_elim`, 3000)) return null;
+  return chat({
+    prompt: FW_PROMPTS.playerEliminated(
+      player?.nickname ?? player?.userId ?? '?',
+      player?.guildId  ?? '?',
+    ),
+    systemPrompt: FW_SYSTEM_PROMPT,
+    model: 'fast',
+  });
+}
+
+async function fwOnGameEnd(room, winnerGuildId, reason) {
+  return chat({
+    prompt: FW_PROMPTS.gameEnd(winnerGuildId, reason),
+    systemPrompt: FW_SYSTEM_PROMPT,
+    model: 'fast',
+  });
+}
+
 export {
   ask,
   clearHistory,
@@ -322,4 +393,10 @@ export {
   onMeeting,
   onVoteResult,
   onGameEnd,
+  fwOnGameStart,
+  fwOnCpCaptured,
+  fwOnDuelResult,
+  fwOnDuelDraw,
+  fwOnPlayerEliminated,
+  fwOnGameEnd,
 };

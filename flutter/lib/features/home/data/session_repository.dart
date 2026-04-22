@@ -3,6 +3,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/network/api_client.dart';
+import '../../auth/data/auth_repository.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 데이터 모델
@@ -13,7 +14,8 @@ class SessionMember {
   final String nickname;
   final String? avatarUrl;
   final bool isHost;
-  final String role; // 'host' | 'admin' | 'member'
+  final String role; // 'host' | 'member'
+  final String? teamId;
   final bool sharingEnabled;
   final double? latitude;
   final double? longitude;
@@ -26,6 +28,7 @@ class SessionMember {
     this.avatarUrl,
     required this.isHost,
     this.role = 'member',
+    this.teamId,
     this.sharingEnabled = true,
     this.latitude,
     this.longitude,
@@ -42,11 +45,110 @@ class SessionMember {
       avatarUrl: m['avatar_url'] as String?,
       isHost: m['is_host'] as bool? ?? false,
       role: m['role'] as String? ?? 'member',
+      teamId: m['team_id'] as String?,
       sharingEnabled: m['sharing_enabled'] as bool? ?? true,
       latitude: (loc?['lat'] as num?)?.toDouble(),
       longitude: (loc?['lng'] as num?)?.toDouble(),
       battery: loc?['battery'] as int?,
       status: loc?['status'] as String? ?? 'idle',
+    );
+  }
+}
+
+class FantasyWarsTeamConfig {
+  final String teamId;
+  final String displayName;
+  final String color;
+
+  const FantasyWarsTeamConfig({
+    required this.teamId,
+    required this.displayName,
+    required this.color,
+  });
+
+  factory FantasyWarsTeamConfig.fromMap(Map<String, dynamic> map) {
+    final teamId = map['teamId'] as String? ?? '';
+    final defaults = _fantasyWarsTeamDefaults[teamId];
+    return FantasyWarsTeamConfig(
+      teamId: teamId,
+      displayName: _normalizeFantasyWarsTeamDisplayName(
+        map['displayName'] as String?,
+        defaults?.displayName ?? '',
+      ),
+      color: map['color'] as String? ?? defaults?.color ?? '#9CA3AF',
+    );
+  }
+}
+
+const Map<String, FantasyWarsTeamConfig> _fantasyWarsTeamDefaults = {
+  'guild_alpha': FantasyWarsTeamConfig(
+    teamId: 'guild_alpha',
+    displayName: '붉은 길드',
+    color: '#DC2626',
+  ),
+  'guild_beta': FantasyWarsTeamConfig(
+    teamId: 'guild_beta',
+    displayName: '푸른 길드',
+    color: '#2563EB',
+  ),
+  'guild_gamma': FantasyWarsTeamConfig(
+    teamId: 'guild_gamma',
+    displayName: '초록 길드',
+    color: '#16A34A',
+  ),
+  'guild_delta': FantasyWarsTeamConfig(
+    teamId: 'guild_delta',
+    displayName: '황금 길드',
+    color: '#D97706',
+  ),
+};
+
+String _normalizeFantasyWarsTeamDisplayName(String? raw, String fallback) {
+  final value = raw?.trim();
+  if (value == null || value.isEmpty) {
+    return fallback;
+  }
+
+  switch (value) {
+    case 'Red Guild':
+      return '붉은 길드';
+    case 'Blue Guild':
+      return '푸른 길드';
+    case 'Green Guild':
+      return '초록 길드';
+    case 'Gold Guild':
+      return '황금 길드';
+    case 'Red Team':
+      return '붉은 팀';
+    case 'Blue Team':
+      return '푸른 팀';
+    case 'Green Team':
+      return '초록 팀';
+    default:
+      return value;
+  }
+}
+
+class FantasyWarsSpawnZone {
+  final String teamId;
+  final List<Map<String, double>> polygonPoints;
+
+  const FantasyWarsSpawnZone({
+    required this.teamId,
+    required this.polygonPoints,
+  });
+
+  factory FantasyWarsSpawnZone.fromMap(Map<String, dynamic> map) {
+    final rawPoints = map['polygonPoints'] as List<dynamic>? ?? const [];
+    return FantasyWarsSpawnZone(
+      teamId: map['teamId'] as String? ?? '',
+      polygonPoints: rawPoints
+          .whereType<Map<String, dynamic>>()
+          .map((p) => {
+                'lat': (p['lat'] as num).toDouble(),
+                'lng': (p['lng'] as num).toDouble(),
+              })
+          .toList(),
     );
   }
 }
@@ -59,19 +161,25 @@ class Session {
   final int memberCount;
   final List<SessionMember> members;
   final DateTime createdAt;
-  final DateTime? expiresAt; // 추가됨: 세션 만료 시간
+  final DateTime? expiresAt;
   final List<String> activeModules;
   final Map<String, dynamic> moduleConfigs;
   final String gameStatus; // 'lobby' | 'playing'
 
-  // ── [Task 3 / Task 5] 게임 설정 ───────────────────────────────────────────
-  /// 킬 쿨타임 (초). 서버 kill_cooldown 컬럼 → 기본 30초.
+  /// 플러그인 gameType ('among_us', 'fantasy_wars', …)
+  final String gameType;
+  /// 플러그인별 설정 맵
+  final Map<String, dynamic> gameConfig;
+  /// 플러그인 버전
+  final String gameVersion;
+
+  // ── 게임 설정 ────────────────────────────────────────────────────────────
   final int killCooldown;
-  /// 긴급 회의 쿨타임 (초). 서버 discussion_time 컬럼 → 기본 90초.
   final int emergencyCooldown;
-  /// 호스트가 설정한 플레이 가능 영역 폴리곤 좌표 목록.
-  /// 서버에서 playable_area JSONB 컬럼으로 저장됩니다.
   final List<Map<String, double>>? playableArea;
+  final List<FantasyWarsTeamConfig> fantasyWarsTeams;
+  final List<Map<String, double>> fantasyWarsControlPoints;
+  final List<FantasyWarsSpawnZone> fantasyWarsSpawnZones;
 
   const Session({
     required this.id,
@@ -85,12 +193,19 @@ class Session {
     this.activeModules = const [],
     this.moduleConfigs = const {},
     this.gameStatus = 'lobby',
+    this.gameType = 'among_us',
+    this.gameConfig = const {},
+    this.gameVersion = '1.0',
     this.killCooldown = 30,
     this.emergencyCooldown = 90,
     this.playableArea,
+    this.fantasyWarsTeams = const [],
+    this.fantasyWarsControlPoints = const [],
+    this.fantasyWarsSpawnZones = const [],
   });
 
-  SessionType get sessionType => SessionType.fromModules(activeModules);
+  /// AmongUs 내부 전용 — 외부에서 호출 금지
+  SessionType get sessionType => SessionType.defaultType;
 
   factory Session.fromMap(Map<String, dynamic> m) {
     final rawMembers = m['members'] as List<dynamic>? ?? [];
@@ -124,6 +239,15 @@ class Session {
             })
         .toList();
 
+    final rawGameType = m['game_type'] as String? ?? '';
+    // 하위호환: game_type이 비어있으면 activeModules 기반 레거시 매핑
+    final resolvedGameType = rawGameType.isEmpty ? 'among_us' : rawGameType;
+    final gameConfig = (m['game_config'] as Map<String, dynamic>?) ?? {};
+    final rawFantasyTeams = gameConfig['teams'] as List<dynamic>? ?? const [];
+    final rawControlPoints =
+        gameConfig['controlPoints'] as List<dynamic>? ?? const [];
+    final rawSpawnZones = gameConfig['spawnZones'] as List<dynamic>? ?? const [];
+
     return Session(
       id: m['id'] as String,
       name: m['name'] as String,
@@ -141,15 +265,33 @@ class Session {
       activeModules: rawModules.whereType<String>().toList(),
       moduleConfigs: rawConfigs,
       gameStatus: m['game_status'] as String? ?? 'lobby',
+      gameType: resolvedGameType,
+      gameConfig: gameConfig,
+      gameVersion: m['game_version'] as String? ?? '1.0',
       killCooldown: killCd,
       emergencyCooldown: emergencyCd,
       playableArea: playableArea,
+      fantasyWarsTeams: rawFantasyTeams
+          .whereType<Map<String, dynamic>>()
+          .map(FantasyWarsTeamConfig.fromMap)
+          .toList(),
+      fantasyWarsControlPoints: rawControlPoints
+          .whereType<Map<String, dynamic>>()
+          .map((p) => {
+                'lat': (p['lat'] as num).toDouble(),
+                'lng': (p['lng'] as num).toDouble(),
+              })
+          .toList(),
+      fantasyWarsSpawnZones: rawSpawnZones
+          .whereType<Map<String, dynamic>>()
+          .map(FantasyWarsSpawnZone.fromMap)
+          .toList(),
     );
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 세션 타입 열거형
+// SessionType — AmongUs 레거시 전용. 신규 게임은 GameUiPluginRegistry를 사용.
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum SessionType {
@@ -158,6 +300,7 @@ enum SessionType {
   verbal,
   location;
 
+  /// AmongUs GameMainScreen 내부에서만 사용. 신규 코드에서 호출 금지.
   List<String> toModules() {
     switch (this) {
       case SessionType.defaultType:
@@ -170,15 +313,6 @@ enum SessionType {
         return ['mission', 'item'];
     }
   }
-
-  static SessionType fromModules(List<String> modules) {
-    if (modules.contains('proximity')) return SessionType.chase;
-    if (modules.contains('vote')) return SessionType.verbal;
-    if (modules.contains('mission')) return SessionType.location;
-    return SessionType.defaultType;
-  }
-
-  int get minPlayers => this == SessionType.defaultType ? 2 : 2;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -194,14 +328,13 @@ class SessionRepository {
     return list.whereType<Map<String, dynamic>>().map(Session.fromMap).toList();
   }
 
-  // ★ 수정됨: killCooldown / emergencyCooldown 파라미터 추가 [Task 5]
   Future<Session> createSession(
     String name,
     int durationHours,
     int maxMembers, {
-    List<String> activeModules = const [],
-    int killCooldown = 30,
-    int emergencyCooldown = 90,
+    String gameType = 'among_us',
+    Map<String, dynamic> gameConfig = const {},
+    String gameVersion = '1.0',
   }) async {
     final res = await _api.post(
       '/sessions',
@@ -209,9 +342,9 @@ class SessionRepository {
         'name': name,
         'durationHours': durationHours,
         'maxMembers': maxMembers,
-        'activeModules': activeModules,
-        'killCooldown': killCooldown,
-        'discussionTime': emergencyCooldown,
+        'gameType': gameType,
+        'gameConfig': gameConfig,
+        'gameVersion': gameVersion,
       },
     );
     return Session.fromMap(res.data['session'] as Map<String, dynamic>);
@@ -268,6 +401,36 @@ class SessionRepository {
         .toList();
   }
 
+  Future<Session> setFantasyWarsLayout(
+    String sessionId, {
+    required List<Map<String, double>> playableArea,
+    required List<Map<String, double>> controlPoints,
+    required List<Map<String, dynamic>> spawnZones,
+  }) async {
+    await _api.patch(
+      '/sessions/$sessionId/fantasy-wars-layout',
+      data: {
+        'playableArea': playableArea
+            .map((p) => {'lat': p['lat'], 'lng': p['lng']})
+            .toList(),
+        'controlPoints': controlPoints
+            .map((p) => {'lat': p['lat'], 'lng': p['lng']})
+            .toList(),
+        'spawnZones': spawnZones
+            .map((zone) => {
+                  'teamId': zone['teamId'],
+                  'polygonPoints': ((zone['polygonPoints'] as List?) ?? const [])
+                      .whereType<Map<String, double>>()
+                      .map((p) => {'lat': p['lat'], 'lng': p['lng']})
+                      .toList(),
+                })
+            .toList(),
+      },
+    );
+
+    return getSession(sessionId);
+  }
+
   Future<void> leaveSession(String id) async {
     await _api.post('/sessions/$id/leave');
   }
@@ -281,16 +444,19 @@ class SessionRepository {
         .patch('/sessions/$sessionId/sharing', data: {'enabled': enabled});
   }
 
-  Future<void> updateMemberRole(
-      String sessionId, String userId, String role) async {
-    await _api.patch(
-      '/sessions/$sessionId/members/$userId/role',
-      data: {'role': role},
-    );
-  }
-
   Future<void> kickMember(String sessionId, String userId) async {
     await _api.delete('/sessions/$sessionId/members/$userId');
+  }
+
+  Future<void> moveMemberToTeam(
+    String sessionId,
+    String userId,
+    String teamId,
+  ) async {
+    await _api.patch(
+      '/sessions/$sessionId/members/$userId/team',
+      data: {'teamId': teamId},
+    );
   }
 
   Future<void> startGame(String sessionId) async {
@@ -307,7 +473,12 @@ final sessionRepositoryProvider = Provider((ref) => SessionRepository());
 // 내 세션 목록 상태 관리
 class SessionListNotifier extends AsyncNotifier<List<Session>> {
   @override
-  Future<List<Session>> build() => _fetch();
+  Future<List<Session>> build() async {
+    // auth가 완전히 결정될 때까지 대기 (로딩 중 불필요한 401 방지)
+    final user = await ref.watch(authProvider.future);
+    if (user == null) return [];
+    return _fetch();
+  }
 
   Future<List<Session>> _fetch() =>
       ref.read(sessionRepositoryProvider).getMySessions();
@@ -317,23 +488,22 @@ class SessionListNotifier extends AsyncNotifier<List<Session>> {
     state = await AsyncValue.guard(_fetch);
   }
 
-  // 세션 생성 후 Session 객체를 반환 (lobby 이동에 사용) [Task 5: 게임 설정 추가]
   Future<Session> createSession(
     String name, {
     int durationHours = 1,
     int maxMembers = 3,
-    List<String> activeModules = const [],
-    int killCooldown = 30,
-    int emergencyCooldown = 90,
+    String gameType = 'among_us',
+    Map<String, dynamic> gameConfig = const {},
+    String gameVersion = '1.0',
   }) async {
     try {
       final session = await ref.read(sessionRepositoryProvider).createSession(
             name,
             durationHours,
             maxMembers,
-            activeModules: activeModules,
-            killCooldown: killCooldown,
-            emergencyCooldown: emergencyCooldown,
+            gameType: gameType,
+            gameConfig: gameConfig,
+            gameVersion: gameVersion,
           );
 
       // 세션 생성 후 목록 새로고침

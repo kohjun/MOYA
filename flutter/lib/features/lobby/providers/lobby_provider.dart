@@ -66,6 +66,7 @@ class LobbyNotifier extends StateNotifier<LobbyState> {
 
   StreamSubscription? _memberJoinSub;
   StreamSubscription? _memberLeftSub;
+  StreamSubscription? _memberUpdatedSub;
   StreamSubscription? _kickedSub;
   StreamSubscription? _gameStartedSub;
   StreamSubscription? _connectionSub;
@@ -104,6 +105,7 @@ class LobbyNotifier extends StateNotifier<LobbyState> {
               nickname: nickname,
               isHost: role == 'host',
               role: role,
+              teamId: data['teamId'] as String?,
             ),
           ],
         );
@@ -115,6 +117,33 @@ class LobbyNotifier extends StateNotifier<LobbyState> {
       if (userId.isEmpty) return;
       state = state.copyWith(
         members: state.members.where((m) => m.userId != userId).toList(),
+      );
+    });
+
+    _memberUpdatedSub = _socket.onMemberUpdated.listen((data) {
+      final userId = data['userId'] as String? ?? '';
+      if (userId.isEmpty) return;
+
+      state = state.copyWith(
+        members: state.members.map((member) {
+          if (member.userId != userId) {
+            return member;
+          }
+
+          return SessionMember(
+            userId: member.userId,
+            nickname: member.nickname,
+            avatarUrl: member.avatarUrl,
+            isHost: member.isHost,
+            role: member.role,
+            teamId: data['teamId'] as String? ?? member.teamId,
+            sharingEnabled: member.sharingEnabled,
+            latitude: member.latitude,
+            longitude: member.longitude,
+            battery: member.battery,
+            status: member.status,
+          );
+        }).toList(),
       );
     });
 
@@ -184,28 +213,10 @@ class LobbyNotifier extends StateNotifier<LobbyState> {
     await _ref.read(sessionRepositoryProvider).kickMember(_sessionId, userId);
   }
 
-  Future<void> promoteToAdmin(String userId) async {
-    await _ref.read(sessionRepositoryProvider).updateMemberRole(
-          _sessionId,
-          userId,
-          'admin',
-        );
-    if (!mounted) return;
-    state = state.copyWith(
-      members: state.members.map((m) {
-        if (m.userId == userId) {
-          return SessionMember(
-            userId: m.userId,
-            nickname: m.nickname,
-            avatarUrl: m.avatarUrl,
-            isHost: m.isHost,
-            role: 'admin',
-            sharingEnabled: m.sharingEnabled,
-          );
-        }
-        return m;
-      }).toList(),
-    );
+  Future<void> moveMemberToTeam(String userId, String teamId) async {
+    await _ref
+        .read(sessionRepositoryProvider)
+        .moveMemberToTeam(_sessionId, userId, teamId);
   }
 
   Future<void> releaseRealtimeResources({
@@ -222,6 +233,7 @@ class LobbyNotifier extends StateNotifier<LobbyState> {
   void dispose() {
     _memberJoinSub?.cancel();
     _memberLeftSub?.cancel();
+    _memberUpdatedSub?.cancel();
     _kickedSub?.cancel();
     _gameStartedSub?.cancel();
     _connectionSub?.cancel();
