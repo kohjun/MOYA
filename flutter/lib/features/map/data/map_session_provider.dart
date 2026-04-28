@@ -65,6 +65,11 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
   final Set<String> _insideGeofences = {};
   List<dynamic> _currentGeofences = [];
 
+  // 내 위치 throttle 상태 (GPS 1틱당 cascade rebuild 방지)
+  DateTime? _lastMyPosAppliedAt;
+  double? _lastMyPosLat;
+  double? _lastMyPosLng;
+
   void _logStartupStep(String label) {}
 
   Future<void> _bootstrapSession(SharedPreferences prefs) async {
@@ -244,6 +249,9 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
     });
 
     _locationSub = _socket.onLocationChanged.listen((payload) {
+      if (payload.sessionId != null && payload.sessionId != _sessionId) {
+        return;
+      }
       final current =
           _pendingUpdates[payload.userId] ?? state.members[payload.userId];
 
@@ -323,13 +331,16 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
 
     _snapshotSub = _socket.onSnapshot.listen((data) {
       final members = data['members'] as List<dynamic>? ?? [];
+      final locations =
+          (data['locations'] as Map?)?.cast<String, dynamic>() ?? const {};
       final updated = Map<String, MemberState>.from(state.members);
       for (final m in members) {
         if (m is! Map<String, dynamic>) continue;
         final userId = m['user_id'] as String? ?? '';
         final nickname = m['nickname'] as String? ?? userId;
         if (userId.isEmpty) continue;
-        final loc = m['lastLocation'] as Map<String, dynamic>?;
+        final loc = (locations[userId] as Map?)?.cast<String, dynamic>() ??
+            (m['lastLocation'] as Map<String, dynamic>?);
         final lat = (loc?['lat'] as num?)?.toDouble();
         final lng = (loc?['lng'] as num?)?.toDouble();
         final role = m['role'] as String? ?? 'member';
@@ -354,9 +365,9 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
         final me = updated[authUser.id]!;
         state = state.copyWith(
           myRole: me.role,
-          sharingEnabled: me.sharingEnabled,
+          sharingEnabled: false,
         );
-        _gps.setSharingEnabled(me.sharingEnabled);
+        _gps.setSharingEnabled(false);
       }
       unawaited(_syncBlePresenceLifecycle());
     });
@@ -387,74 +398,81 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
     });
   }
 
-  Future<void> _syncBlePresenceLifecycle() async {
-    final authUser = _ref.read(authProvider).valueOrNull;
-    final shouldRun = authUser != null &&
-        state.isConnected &&
-        state.gameState.status == 'in_progress' &&
-        state.gameState.gameType == 'fantasy_wars_artifact';
-
-    if (!shouldRun) {
-      await _ble.stop();
-      if (mounted && state.bleContacts.isNotEmpty) {
-        state = state.copyWith(bleContacts: const {});
-      }
-      return;
-    }
-
-    await _ble.start(
-      sessionId: _sessionId,
-      userId: authUser.id,
-      memberUserIds: state.members.keys,
-    );
-  }
+  // BLE는 결투 수락 시점에 BleDuelNotifier가 관리하므로
+  // map_session_provider에서는 자동 시작하지 않는다.
+  Future<void> _syncBlePresenceLifecycle() async {}
 
   Future<void> _startGpsTracking() async {
     try {
       _gps.setSessionId(_sessionId);
       await _gps.startTracking();
       _myPositionSub = _gps.positionStream.listen((pos) {
-        state = state.copyWith(myPosition: pos);
+        // ── Throttle: 1.5초 미만 & 5m 미만 이동은 무시 (rebuild 폭주 방지) ──
+        final now = DateTime.now();
+        final movedEnough = _lastMyPosLat == null ||
+            _haversineMeters(
+                  _lastMyPosLat!,
+                  _lastMyPosLng!,
+                  pos.latitude,
+                  pos.longitude,
+                ) >=
+                5.0;
+        final timeEnough = _lastMyPosAppliedAt == null ||
+            now.difference(_lastMyPosAppliedAt!).inMilliseconds >= 1500;
+        if (!movedEnough && !timeEnough) {
+          _checkGeofences(pos);
+          return;
+        }
+        _lastMyPosAppliedAt = now;
+        _lastMyPosLat = pos.latitude;
+        _lastMyPosLng = pos.longitude;
 
+        // ── 모든 변경을 단일 state 갱신으로 합침 (rebuild 1회) ──
         final authUser = _ref.read(authProvider).valueOrNull;
-        if (authUser != null) {
-          final myId = authUser.id;
-          final currentMe = state.members[myId];
+        if (authUser == null) {
+          state = state.copyWith(myPosition: pos);
+          _checkGeofences(pos);
+          return;
+        }
 
-          if (currentMe != null) {
-            final updated = Map<String, MemberState>.from(state.members);
-            updated[myId] = currentMe.copyWith(
-              lat: pos.latitude,
-              lng: pos.longitude,
-              updatedAt: DateTime.now(),
-            );
-            state = state.copyWith(members: updated);
-          }
-
-          final distances = <String, double>{};
-          String? closestId;
-          double closestDist = double.infinity;
-          for (final entry in state.members.entries) {
-            if (entry.key == myId) continue;
-            final member = entry.value;
-            if (member.lat == 0 && member.lng == 0) continue;
-            final dist = _haversineMeters(
-              pos.latitude,
-              pos.longitude,
-              member.lat,
-              member.lng,
-            );
-            distances[member.userId] = dist;
-            if (dist < closestDist) {
-              closestDist = dist;
-              closestId = member.userId;
-            }
-          }
-          state = state.copyWith(
-            memberDistances: distances,
-            proximateTargetId: closestDist <= 15.0 ? closestId : null,
+        final myId = authUser.id;
+        final currentMe = state.members[myId];
+        Map<String, MemberState> members = state.members;
+        if (currentMe != null) {
+          members = Map<String, MemberState>.from(members);
+          members[myId] = currentMe.copyWith(
+            lat: pos.latitude,
+            lng: pos.longitude,
+            updatedAt: now,
           );
         }
+
+        final distances = <String, double>{};
+        double closestDist = double.infinity;
+        String? closestId;
+        for (final entry in members.entries) {
+          if (entry.key == myId) continue;
+          final member = entry.value;
+          if (member.lat == 0 && member.lng == 0) continue;
+          final dist = _haversineMeters(
+            pos.latitude,
+            pos.longitude,
+            member.lat,
+            member.lng,
+          );
+          distances[member.userId] = dist;
+          if (dist < closestDist) {
+            closestDist = dist;
+            closestId = member.userId;
+          }
+        }
+
+        state = state.copyWith(
+          myPosition: pos,
+          members: members,
+          memberDistances: distances,
+          proximateTargetId: closestDist <= 15.0 ? closestId : null,
+        );
 
         _checkGeofences(pos);
       });
@@ -494,9 +512,9 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
           final me = myList.first;
           state = state.copyWith(
             myRole: me.role,
-            sharingEnabled: me.sharingEnabled,
+            sharingEnabled: false,
           );
-          _gps.setSharingEnabled(me.sharingEnabled);
+          _gps.setSharingEnabled(false);
         }
       }
     } catch (e) {
@@ -599,20 +617,8 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
     _socket.sendSOS(lat: pos?.latitude, lng: pos?.longitude);
   }
 
-  void sendKillAction(String targetUserId) {
-    _socket.interactAction(
-      sessionId: _sessionId,
-      actionType: 'PROXIMITY_KILL',
-      targetUserId: targetUserId,
-    );
-  }
-
   void startGame() {
     _socket.emitGameStart(_sessionId);
-  }
-
-  void openVote(Function(Map) onResult) {
-    _socket.emitVoteOpen(_sessionId, onResult);
   }
 
   Future<void> reconnect() async {

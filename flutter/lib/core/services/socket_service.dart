@@ -1,4 +1,4 @@
-﻿// lib/core/services/socket_service.dart
+// lib/core/services/socket_service.dart
 
 import 'dart:async';
 import 'dart:math' as math;
@@ -13,6 +13,7 @@ const _wsUrl = 'http://10.0.2.2:3000';
 // ─────────────────────────────────────────────────────────────────────────────
 class LocationPayload {
   final String userId;
+  final String? sessionId;
   final String? nickname;
   final double lat;
   final double lng;
@@ -26,6 +27,7 @@ class LocationPayload {
 
   const LocationPayload({
     required this.userId,
+    this.sessionId,
     this.nickname,
     required this.lat,
     required this.lng,
@@ -40,6 +42,7 @@ class LocationPayload {
 
   factory LocationPayload.fromMap(Map<String, dynamic> map) => LocationPayload(
         userId: map['userId'] as String,
+        sessionId: map['sessionId'] as String?,
         nickname: map['nickname'] as String?,
         lat: (map['lat'] as num).toDouble(),
         lng: (map['lng'] as num).toDouble(),
@@ -97,6 +100,16 @@ class SocketEvents {
   static const mediaConsume = 'consume';
   static const mediaNewProducer = 'media:newProducer';
   static const mediaProducerClosed = 'media:producerClosed';
+
+  // Color Chaser
+  static const ccTagTarget = 'cc:tag_target';
+  static const ccMissionStart = 'cc:mission_start';
+  static const ccMissionSubmit = 'cc:mission_submit';
+  static const ccSetBodyProfile = 'cc:set_body_profile';
+  static const ccPlayerTagged = 'cc:player_tagged';
+  static const ccCpActivated = 'cc:cp_activated';
+  static const ccCpClaimed = 'cc:cp_claimed';
+  static const ccCpExpired = 'cc:cp_expired';
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -157,13 +170,20 @@ class SocketService {
       _gameEventControllers = {};
 
   // FW 대결 스트림 컨트롤러
-  final _fwDuelChallengedController  = StreamController<Map<String, dynamic>>.broadcast();
-  final _fwDuelAcceptedController    = StreamController<Map<String, dynamic>>.broadcast();
-  final _fwDuelRejectedController    = StreamController<Map<String, dynamic>>.broadcast();
-  final _fwDuelCancelledController   = StreamController<Map<String, dynamic>>.broadcast();
-  final _fwDuelStartedController     = StreamController<Map<String, dynamic>>.broadcast();
-  final _fwDuelResultController      = StreamController<Map<String, dynamic>>.broadcast();
-  final _fwDuelInvalidatedController = StreamController<Map<String, dynamic>>.broadcast();
+  final _fwDuelChallengedController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  final _fwDuelAcceptedController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  final _fwDuelRejectedController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  final _fwDuelCancelledController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  final _fwDuelStartedController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  final _fwDuelResultController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  final _fwDuelInvalidatedController =
+      StreamController<Map<String, dynamic>>.broadcast();
 
   Stream<LocationPayload> get onLocationChanged => _locationController.stream;
   Stream<Map<String, dynamic>> get onMemberJoined =>
@@ -199,13 +219,20 @@ class SocketService {
       _voiceSpeakingController.stream;
 
   // FW 대결 스트림 getter
-  Stream<Map<String, dynamic>> get onFwDuelChallenged  => _fwDuelChallengedController.stream;
-  Stream<Map<String, dynamic>> get onFwDuelAccepted    => _fwDuelAcceptedController.stream;
-  Stream<Map<String, dynamic>> get onFwDuelRejected    => _fwDuelRejectedController.stream;
-  Stream<Map<String, dynamic>> get onFwDuelCancelled   => _fwDuelCancelledController.stream;
-  Stream<Map<String, dynamic>> get onFwDuelStarted     => _fwDuelStartedController.stream;
-  Stream<Map<String, dynamic>> get onFwDuelResult      => _fwDuelResultController.stream;
-  Stream<Map<String, dynamic>> get onFwDuelInvalidated => _fwDuelInvalidatedController.stream;
+  Stream<Map<String, dynamic>> get onFwDuelChallenged =>
+      _fwDuelChallengedController.stream;
+  Stream<Map<String, dynamic>> get onFwDuelAccepted =>
+      _fwDuelAcceptedController.stream;
+  Stream<Map<String, dynamic>> get onFwDuelRejected =>
+      _fwDuelRejectedController.stream;
+  Stream<Map<String, dynamic>> get onFwDuelCancelled =>
+      _fwDuelCancelledController.stream;
+  Stream<Map<String, dynamic>> get onFwDuelStarted =>
+      _fwDuelStartedController.stream;
+  Stream<Map<String, dynamic>> get onFwDuelResult =>
+      _fwDuelResultController.stream;
+  Stream<Map<String, dynamic>> get onFwDuelInvalidated =>
+      _fwDuelInvalidatedController.stream;
 
   bool get isConnected => _isConnected;
   String? get currentSessionId => _currentSessionId;
@@ -426,46 +453,35 @@ class SocketService {
         }
       })
       ..on(gameRoleAssigned, (data) => _emitGameEvent(gameRoleAssigned, data))
-      ..on(gameKillConfirmed, (data) => _emitGameEvent(gameKillConfirmed, data))
-      ..on(gameBodyFound, (data) => _emitGameEvent(gameBodyFound, data))
-      ..on(gameMeetingStarted,
-          (data) => _emitGameEvent(gameMeetingStarted, data))
-      ..on(gameMeetingTick, (data) => _emitGameEvent(gameMeetingTick, data))
-      ..on(gameVotingStarted, (data) => _emitGameEvent(gameVotingStarted, data))
-      ..on(gameVoteSubmitted, (data) => _emitGameEvent(gameVoteSubmitted, data))
-      ..on(gamePreVoteSubmitted,
-          (data) => _emitGameEvent(gamePreVoteSubmitted, data))
-      ..on(gameVoteResult, (data) => _emitGameEvent(gameVoteResult, data))
-      ..on(gameMeetingEnded, (data) => _emitGameEvent(gameMeetingEnded, data))
       ..on(gameAiMessage, (data) => _emitGameEvent(gameAiMessage, data))
       ..on(gameAiReply, (data) => _emitGameEvent(gameAiReply, data))
-      ..on(gameMissionProgress,
-          (data) => _emitGameEvent(gameMissionProgress, data))
-      ..on(gameTaskProgress,
-          (data) => _emitGameEvent(gameTaskProgress, data))
-      ..on(gameSabotageActive,
-          (data) => _emitGameEvent(gameSabotageActive, data))
-      ..on(gameSabotageFixed,
-          (data) => _emitGameEvent(gameSabotageFixed, data))
-      ..on(gameMissionsAssigned,
-          (data) => _emitGameEvent(gameMissionsAssigned, data))
+      ..on('ai:failed', (data) => _emitGameEvent('ai:failed', data))
+      ..on('ai:recovered', (data) => _emitGameEvent('ai:recovered', data))
 
       // FW 대결 이벤트 수신
       ..on(fwDuelChallenged,
           (data) => _fwDuelChallengedController.add(_toMap(data)))
-      ..on(fwDuelAccepted,
-          (data) => _fwDuelAcceptedController.add(_toMap(data)))
-      ..on(fwDuelRejected,
-          (data) => _fwDuelRejectedController.add(_toMap(data)))
+      ..on(
+          fwDuelAccepted, (data) => _fwDuelAcceptedController.add(_toMap(data)))
+      ..on(
+          fwDuelRejected, (data) => _fwDuelRejectedController.add(_toMap(data)))
       ..on(fwDuelCancelled,
           (data) => _fwDuelCancelledController.add(_toMap(data)))
-      ..on(fwDuelStarted,
-          (data) => _fwDuelStartedController.add(_toMap(data)))
-      ..on(fwDuelResult,
-          (data) => _fwDuelResultController.add(_toMap(data)))
+      ..on(fwDuelStarted, (data) => _fwDuelStartedController.add(_toMap(data)))
+      ..on(fwDuelResult, (data) => _fwDuelResultController.add(_toMap(data)))
       ..on(fwDuelInvalidated,
           (data) => _fwDuelInvalidatedController.add(_toMap(data)))
-      ..on(fwDuelLog, (data) => _emitGameEvent(fwDuelLog, data));
+      ..on(fwDuelLog, (data) => _emitGameEvent(fwDuelLog, data))
+
+      // Color Chaser broadcast
+      ..on(SocketEvents.ccPlayerTagged,
+          (data) => _emitGameEvent(SocketEvents.ccPlayerTagged, data))
+      ..on(SocketEvents.ccCpActivated,
+          (data) => _emitGameEvent(SocketEvents.ccCpActivated, data))
+      ..on(SocketEvents.ccCpClaimed,
+          (data) => _emitGameEvent(SocketEvents.ccCpClaimed, data))
+      ..on(SocketEvents.ccCpExpired,
+          (data) => _emitGameEvent(SocketEvents.ccCpExpired, data));
   }
 
   static Map<String, dynamic> _toMap(dynamic data) =>
@@ -510,6 +526,7 @@ class SocketService {
     String source = 'gps',
     int? battery,
     String status = 'moving',
+    String visibility = 'private',
   }) {
     if (!_isConnected || _currentSessionId == null) return;
 
@@ -524,6 +541,7 @@ class SocketService {
       'source': source,
       'battery': battery,
       'status': status,
+      'visibility': visibility,
     });
   }
 
@@ -539,6 +557,7 @@ class SocketService {
     String source = 'gps',
     int? battery,
     String status = 'moving',
+    String visibility = 'private',
   }) {
     if (!_isConnected) return;
 
@@ -553,6 +572,7 @@ class SocketService {
       'source': source,
       'battery': battery,
       'status': status,
+      'visibility': visibility,
     });
   }
 
@@ -584,21 +604,6 @@ class SocketService {
   void emitGameStart(String sessionId) {
     if (!_isConnected) return;
     _socket?.emit(SocketEvents.gameStart, {'sessionId': sessionId});
-  }
-
-  void emitVoteOpen(String sessionId, Function(Map) callback) {
-    if (!_isConnected) {
-      callback({'ok': false, 'error': 'SOCKET_DISCONNECTED'});
-      return;
-    }
-
-    _socket?.emitWithAck(
-      'game:emergency',
-      {'sessionId': sessionId},
-      ack: (data) => callback(
-        data is Map ? Map<String, dynamic>.from(data) : {'ok': false},
-      ),
-    );
   }
 
   void requestGameState(String sessionId) {
@@ -656,26 +661,19 @@ class SocketService {
     return completer.future;
   }
 
-  void interactAction({
-    required String sessionId,
-    required String actionType,
-    required String targetUserId,
-  }) {
-    if (!_isConnected) return;
-    _socket?.emit(SocketEvents.actionInteract, {
-      'sessionId': sessionId,
-      'actionType': actionType,
-      'targetUserId': targetUserId,
-    });
-  }
-
   void sendLocationUpdate(
-      String sessionId, double lat, double lng, String status) {
+    String sessionId,
+    double lat,
+    double lng,
+    String status, {
+    String visibility = 'private',
+  }) {
     _socket?.emit(SocketEvents.locationUpdate, {
       'sessionId': sessionId,
       'lat': lat,
       'lng': lng,
       'status': status,
+      'visibility': visibility,
     });
   }
 
@@ -754,103 +752,40 @@ class SocketService {
   // ─────────────────────────────────────────────────────────────────────────
 
   // Client → Server
-  static const String fwCaptureStart  = 'fw:capture_start';
+  static const String fwCaptureStart = 'fw:capture_start';
   static const String fwCaptureCancel = 'fw:capture_cancel';
-  static const String fwUseSkill      = 'fw:use_skill';
-  static const String fwDungeonEnter  = 'fw:dungeon_enter';
+  static const String fwUseSkill = 'fw:use_skill';
+  static const String fwDungeonEnter = 'fw:dungeon_enter';
   static const String fwDuelChallenge = 'fw:duel:challenge';
-  static const String fwDuelAccept    = 'fw:duel:accept';
-  static const String fwDuelReject    = 'fw:duel:reject';
-  static const String fwDuelCancel    = 'fw:duel:cancel';
-  static const String fwDuelSubmit    = 'fw:duel:submit';
+  static const String fwDuelAccept = 'fw:duel:accept';
+  static const String fwDuelReject = 'fw:duel:reject';
+  static const String fwDuelCancel = 'fw:duel:cancel';
+  static const String fwDuelSubmit = 'fw:duel:submit';
 
   // Server → Client
-  static const String fwDuelChallenged  = 'fw:duel:challenged';
-  static const String fwDuelAccepted    = 'fw:duel:accepted';
-  static const String fwDuelRejected    = 'fw:duel:rejected';
-  static const String fwDuelCancelled   = 'fw:duel:cancelled';
-  static const String fwDuelStarted     = 'fw:duel:started';
-  static const String fwDuelResult      = 'fw:duel:result';
+  static const String fwDuelChallenged = 'fw:duel:challenged';
+  static const String fwDuelAccepted = 'fw:duel:accepted';
+  static const String fwDuelRejected = 'fw:duel:rejected';
+  static const String fwDuelCancelled = 'fw:duel:cancelled';
+  static const String fwDuelStarted = 'fw:duel:started';
+  static const String fwDuelResult = 'fw:duel:result';
   static const String fwDuelInvalidated = 'fw:duel:invalidated';
-  static const String fwDuelLog         = 'fw:duel_log';
+  static const String fwDuelLog = 'fw:duel_log';
 
   // ─────────────────────────────────────────────────────────────────────────
-  // 게임 이벤트 상수 (Among Us 플러그인)
+  // 게임 이벤트 상수
   // ─────────────────────────────────────────────────────────────────────────
   static const String gameStarted = 'game:started';
   static const String gameRoleAssigned = 'game:role_assigned';
-  static const String gameKillConfirmed = 'game:kill_confirmed';
-  static const String gameBodyFound = 'game:body_found';
-  static const String gameMeetingStarted = 'game:meeting_started';
-  static const String gameMeetingTick = 'game:meeting_tick';
-  static const String gameVotingStarted = 'game:voting_started';
-  static const String gameVoteSubmitted = 'game:vote_submitted';
-  static const String gamePreVoteSubmitted = 'game:pre_vote_submitted';
-  static const String gameVoteResult = 'game:vote_result';
-  static const String gameMeetingEnded = 'game:meeting_ended';
   static const String gameAiMessage = 'game:ai_message';
   static const String gameAiReply = 'game:ai_reply';
-  static const String gameMissionProgress = 'game:mission_progress';
-  static const String gameTaskProgress = 'task_progress';
   static const String gameOver = 'game:over';
-  static const String gameSabotageActive   = 'game:sabotage_active';
-  static const String gameSabotageFixed    = 'game:sabotage_fixed';
-  static const String gameMissionsAssigned = 'game:missions_assigned';
 
   // ─────────────────────────────────────────────────────────────────────────
   // 게임 액션 메서드
   // ─────────────────────────────────────────────────────────────────────────
   void startGame(String sessionId) {
     _socket?.emit('game:start', {'sessionId': sessionId});
-  }
-
-  void sendKill(String sessionId, String targetUserId) {
-    _socket?.emit(
-        'game:kill', {'sessionId': sessionId, 'targetUserId': targetUserId});
-  }
-
-  void sendEmergencyMeeting(String sessionId, [Function(Map)? callback]) {
-    if (callback == null) {
-      _socket?.emit('game:emergency', {'sessionId': sessionId});
-      return;
-    }
-
-    _socket?.emitWithAck(
-      'game:emergency',
-      {'sessionId': sessionId},
-      ack: (data) => callback(
-        data is Map ? Map<String, dynamic>.from(data) : {'ok': false},
-      ),
-    );
-  }
-
-  void sendReport(String sessionId, String bodyId) {
-    _socket?.emit('game:report', {'sessionId': sessionId, 'bodyId': bodyId});
-  }
-
-  void sendVote(String sessionId, String targetId, Function(Map) callback) {
-    _socket?.emitWithAck(
-      'game:vote',
-      {'sessionId': sessionId, 'targetId': targetId},
-      ack: (data) => callback(data as Map),
-    );
-  }
-
-  void sendMissionComplete(String sessionId, String missionId) {
-    _socket?.emit('game:mission_complete',
-        {'sessionId': sessionId, 'missionId': missionId});
-  }
-
-  void sendTriggerSabotage(String sessionId, String missionId) {
-    if (!_isConnected) return;
-    _socket?.emit('game:trigger_sabotage',
-        {'sessionId': sessionId, 'missionId': missionId});
-  }
-
-  void sendFixSabotage(String sessionId, String missionId) {
-    if (!_isConnected) return;
-    _socket?.emit('game:fix_sabotage',
-        {'sessionId': sessionId, 'missionId': missionId});
   }
 
   void sendAiQuestion(
@@ -881,6 +816,49 @@ class SocketService {
 
   Stream<Map<String, dynamic>> onGameEvent(String event) {
     return _controllerForGameEvent(event).stream;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Color Chaser — 처치 시도
+  // ─────────────────────────────────────────────────────────────────────────
+  Future<Map<String, dynamic>> sendCcTagTarget({
+    required String sessionId,
+    required String targetUserId,
+  }) {
+    return emitWithAck(SocketEvents.ccTagTarget, {
+      'sessionId': sessionId,
+      'targetUserId': targetUserId,
+    });
+  }
+
+  Future<Map<String, dynamic>> sendCcMissionStart({
+    required String sessionId,
+    required String cpId,
+  }) {
+    return emitWithAck(SocketEvents.ccMissionStart, {
+      'sessionId': sessionId,
+      'cpId': cpId,
+    });
+  }
+
+  Future<Map<String, dynamic>> sendCcMissionSubmit({
+    required String sessionId,
+    required String answer,
+  }) {
+    return emitWithAck(SocketEvents.ccMissionSubmit, {
+      'sessionId': sessionId,
+      'answer': answer,
+    });
+  }
+
+  Future<Map<String, dynamic>> sendCcSetBodyProfile({
+    required String sessionId,
+    required Map<String, String> profile,
+  }) {
+    return emitWithAck(SocketEvents.ccSetBodyProfile, {
+      'sessionId': sessionId,
+      'profile': profile,
+    });
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -935,7 +913,7 @@ class SocketService {
     String sessionId,
     String targetUserId, {
     Map<String, dynamic>? proximity,
-  ) {
+  }) {
     return emitWithAck(fwDuelChallenge, {
       'sessionId': sessionId,
       'targetUserId': targetUserId,

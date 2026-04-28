@@ -1,44 +1,29 @@
 import { redisClient } from '../config/redis.js';
-import VoteSystem from '../game/VoteSystem.js';
+import { GamePluginRegistry } from '../game/index.js';
 
 const GAME_TTL = 86400;
+const DEFAULT_GAME_TYPE = 'fantasy_wars_artifact';
+const LOBBY_CHANNEL = 'lobby';
 
-// Redis key helpers — single source of truth for key naming
 export const keys = {
   state:   (sessionId) => `game:state:${sessionId}`,
   started: (sessionId) => `game:started:${sessionId}`,
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// normalizeGameState — generic; AmongUs fields live in pluginState
-// Handles both legacy format (root-level impostors/killLog) and new format.
-// ─────────────────────────────────────────────────────────────────────────────
-
 export const normalizeGameState = (raw = {}) => {
-  const alivePlayerIds = Array.isArray(raw.alivePlayerIds)  ? raw.alivePlayerIds
-                       : Array.isArray(raw.aliveMembers)    ? raw.aliveMembers
+  const alivePlayerIds = Array.isArray(raw.alivePlayerIds) ? raw.alivePlayerIds
+                       : Array.isArray(raw.aliveMembers)   ? raw.aliveMembers
                        : [];
 
-  // Migrate legacy root-level AmongUs fields into pluginState
-  const pluginState = raw.pluginState ?? {
-    impostors:    Array.isArray(raw.impostors)  ? raw.impostors  : [],
-    killLog:      Array.isArray(raw.killLog)    ? raw.killLog    : [],
-    meetingCount: Number.isInteger(raw.meetingCount) ? raw.meetingCount : 0,
-  };
-
   return {
-    gameType:       raw.gameType    ?? 'among_us',
+    gameType:       raw.gameType   ?? DEFAULT_GAME_TYPE,
     status:         raw.status === 'playing' ? 'in_progress' : (raw.status ?? 'in_progress'),
-    startedAt:      raw.startedAt   ?? Date.now(),
-    finishedAt:     raw.finishedAt  ?? null,
+    startedAt:      raw.startedAt  ?? Date.now(),
+    finishedAt:     raw.finishedAt ?? null,
     alivePlayerIds,
-    pluginState,
+    pluginState:    raw.pluginState ?? {},
   };
 };
-
-// ─────────────────────────────────────────────────────────────────────────────
-// saveGameState — always writes to new key namespace
-// ─────────────────────────────────────────────────────────────────────────────
 
 export const saveGameState = async (sessionId, rawGameState, ttlSeconds = GAME_TTL) => {
   const normalized = normalizeGameState(rawGameState);
@@ -46,21 +31,52 @@ export const saveGameState = async (sessionId, rawGameState, ttlSeconds = GAME_T
   return normalized;
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// readGameState — reads from new key, falls back to legacy key for migration
-// ─────────────────────────────────────────────────────────────────────────────
-
 export const readGameState = async (sessionId) => {
   let raw = await redisClient.get(keys.state(sessionId));
-  // Legacy fallback: old key format was `game:{sessionId}`
   if (!raw) raw = await redisClient.get(`game:${sessionId}`);
   if (!raw) return null;
   return normalizeGameState(JSON.parse(raw));
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// syncMediaRoomState
-// ─────────────────────────────────────────────────────────────────────────────
+// Route peers to channels based on the plugin's voice policy.
+// mode === 'open'  → everyone → 'lobby'                (voiceState = lobby)
+// mode === 'muted' → everyone → 'lobby'                (voiceState = muted)
+// mode === 'team'  → each peer → 'team:{teamId}'       (voiceState = lobby, channel isolation handles siloing)
+const applyVoicePolicyToRoom = (room, plugin, gameState) => {
+  if (!plugin?.getVoicePolicy) {
+    room.muteAll();
+    return;
+  }
+
+  const peers = [...room.peers.values()];
+  const policies = peers.map((peer) => ({
+    peer,
+    policy: plugin.getVoicePolicy(gameState, { userId: peer.userId }) ?? { mode: 'muted' },
+  }));
+
+  const anyTeam = policies.some((entry) => entry.policy.mode === 'team');
+
+  policies.forEach(({ peer, policy }) => {
+    const targetChannel = policy.mode === 'team' && policy.teamId
+      ? `team:${policy.teamId}`
+      : LOBBY_CHANNEL;
+    if (peer.channelId !== targetChannel) {
+      room.setPeerChannel(peer.userId, targetChannel);
+    }
+  });
+
+  if (anyTeam) {
+    room.openLobbyVoice();
+    return;
+  }
+
+  const allMuted = policies.every((entry) => entry.policy.mode === 'muted');
+  if (allMuted) {
+    room.muteAll();
+  } else {
+    room.openLobbyVoice();
+  }
+};
 
 export const syncMediaRoomState = async (sessionId, room) => {
   if (!room) return null;
@@ -68,26 +84,22 @@ export const syncMediaRoomState = async (sessionId, room) => {
   const gameState = await readGameState(sessionId);
   if (!gameState) {
     room.setAlivePeers([...room.peers.keys()]);
+    [...room.peers.values()].forEach((peer) => {
+      if (peer.channelId !== LOBBY_CHANNEL) {
+        room.setPeerChannel(peer.userId, LOBBY_CHANNEL);
+      }
+    });
     room.openLobbyVoice();
     return null;
   }
 
   room.setAlivePeers(gameState.alivePlayerIds);
 
-  if (VoteSystem.hasActiveMeeting(sessionId)) {
-    room.startEmergencyMeeting();
-  } else if (gameState.status === 'in_progress') {
-    room.muteAll();
-  } else {
-    room.openLobbyVoice();
-  }
+  const plugin = GamePluginRegistry.get(gameState.gameType);
+  applyVoicePolicyToRoom(room, plugin, gameState);
 
   return gameState;
 };
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ensureMediaRoomForSocket
-// ─────────────────────────────────────────────────────────────────────────────
 
 export const ensureMediaRoomForSocket = async ({ socket, mediaServer, sessionId }) => {
   if (!mediaServer) return null;

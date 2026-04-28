@@ -623,6 +623,13 @@ const List<_GameInfo> _kGameCatalog = [
     icon:        Icons.castle,
     color:       Color(0xFF7B2FBE),
   ),
+  _GameInfo(
+    gameType:    'color_chaser',
+    displayName: '무지개 꼬리잡기: 컬러 체이서',
+    description: '무지개색 순환 구조로 서로의 꼬리를 쫓는 위치 기반 추격전입니다.',
+    icon:        Icons.palette,
+    color:       Color(0xFFE11D48),
+  ),
 ];
 
 class _GameCatalogCard extends StatelessWidget {

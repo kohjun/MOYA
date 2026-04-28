@@ -34,8 +34,11 @@ import {
   checkWinCondition as evaluateWinCondition,
   syncPendingMajorityVictory,
 } from './winConditions.js';
+import { runExclusive } from './mutex.js';
 import * as AIDirector from '../../../ai/AIDirector.js';
 import { getSessionSnapshot, haversineMeters } from '../../../services/locationService.js';
+import { getMediaServer } from '../../../media/MediaServer.js';
+import { syncMediaRoomState } from '../../../websocket/socketRuntime.js';
 
 const majorityHoldTimers = new Map();
 
@@ -59,6 +62,15 @@ function finalizeWin(gameState, win, io, sessionId) {
     reason: win.reason,
   });
 
+  // 게임 종료 시 음성 채널을 길드별 격리에서 lobby(전체 오픈)로 전환.
+  // syncMediaRoomState가 plugin.getVoicePolicy를 다시 평가해 status='finished'면 'open'을 반환한다.
+  const mediaRoom = getMediaServer()?.getRoom(sessionId);
+  if (mediaRoom) {
+    syncMediaRoomState(sessionId, mediaRoom).catch((err) => {
+      console.error('[FW] voice resync on game end failed:', err);
+    });
+  }
+
   AIDirector.fwOnGameEnd(
     { roomId: sessionId, pluginState: ps },
     win.winner,
@@ -80,7 +92,7 @@ function scheduleMajorityHoldTimer({ sessionId, io, readState, saveState, pendin
   }
 
   const delayMs = Math.max(0, pendingVictory.holdUntil - Date.now());
-  const timer = setTimeout(async () => {
+  const timer = setTimeout(() => runExclusive(`fw:session:${sessionId}`, async () => {
     majorityHoldTimers.delete(sessionId);
 
     const fresh = await readState();
@@ -95,7 +107,7 @@ function scheduleMajorityHoldTimer({ sessionId, io, readState, saveState, pendin
 
     finalizeWin(fresh, win, io, sessionId);
     await saveState(fresh);
-  }, delayMs);
+  }), delayMs);
 
   majorityHoldTimers.set(sessionId, timer);
 }
@@ -289,16 +301,21 @@ async function getControlPointPresence(sessionId, ps, cp, config, requesterUserI
   const snapshot = await getSessionSnapshot(sessionId, memberIds);
   const now = Date.now();
   const freshnessMs = config.locationFreshnessMs ?? 45_000;
+  const accuracyMaxMeters = config.locationAccuracyMaxMeters ?? 50;
   const radiusMeters = config.captureRadiusMeters ?? 30;
   const entries = [];
 
   memberIds.forEach((memberUserId) => {
     const player = playerStates[memberUserId];
     const location = snapshot[memberUserId];
+    // 정확도가 임계값보다 나쁜(=값이 큰) 위치는 신뢰하지 않는다. accuracy가 누락된 경우는 통과시킨다.
+    const accuracyOk = location?.accuracy == null
+      || (Number.isFinite(location.accuracy) && location.accuracy <= accuracyMaxMeters);
     const isFresh = Boolean(
       location
       && typeof location.ts === 'number'
-      && (now - location.ts) <= freshnessMs,
+      && (now - location.ts) <= freshnessMs
+      && accuracyOk,
     );
 
     let inZone = false;
@@ -361,7 +378,11 @@ function broadcastWinIfDone(gameState, io, sessionId) {
 }
 
 async function handleCaptureStart({ controlPointId }, ctx) {
+  // dispatch에서 세션 락을 잡고 gameState를 fresh하게 읽어 ctx에 넣어주므로 여기서는 ctx.gameState를 그대로 사용한다.
   const { userId, sessionId, gameState, saveState, readState, io } = ctx;
+  if (!controlPointId) {
+    return { error: 'CP_NOT_FOUND' };
+  }
   const ps = gameState.pluginState ?? {};
   const config = cfg(ps);
   const cp = findControlPointById(ps, controlPointId);
@@ -474,7 +495,9 @@ async function handleCaptureStart({ controlPointId }, ctx) {
   const captureDurationMs = (config.captureDurationSec ?? 30) * 1000;
   const captureGuildId = player.guildId;
 
-  scheduleCaptureComplete(timerKey, captureDurationMs, async () => {
+  scheduleCaptureComplete(timerKey, captureDurationMs, () => runExclusive(
+    `fw:session:${sessionId}`,
+    async () => {
     const fresh = await readState();
     if (!fresh) {
       return;
@@ -564,13 +587,17 @@ async function handleCaptureStart({ controlPointId }, ctx) {
         });
       }
     }).catch(() => {});
-  });
+    },
+  ));
 
   return true;
 }
 
 async function handleCaptureCancel({ controlPointId }, ctx) {
   const { userId, sessionId, gameState, saveState, io } = ctx;
+  if (!controlPointId) {
+    return { error: 'CP_NOT_FOUND' };
+  }
   const ps = gameState.pluginState ?? {};
   const config = cfg(ps);
   const cp = findControlPointById(ps, controlPointId);
@@ -665,6 +692,18 @@ async function handleUseSkill({ skill, targetUserId, controlPointId }, ctx) {
   await saveState(gameState);
 
   socket.emit('fw:skill_used', { skill, effect, result });
+  if (result.type === 'reveal' && result.targetUserId) {
+    const snapshot = await getSessionSnapshot(sessionId, [result.targetUserId]);
+    const location = snapshot[result.targetUserId];
+    if (location) {
+      socket.emit('location:changed', {
+        userId: result.targetUserId,
+        sessionId,
+        ...location,
+        visibility: 'revealed',
+      });
+    }
+  }
   io.to(`session:${sessionId}`).emit('fw:player_skill', {
     userId,
     skill,
@@ -708,7 +747,7 @@ async function handleDungeonEnter({ dungeonId = 'dungeon_main' }, ctx) {
 }
 
 function scheduleDungeonAttempt(timerKey, userId, sessionId, config, readState, saveState, io) {
-  scheduleDungeonRevive(timerKey, async () => {
+  scheduleDungeonRevive(timerKey, () => runExclusive(`fw:session:${sessionId}`, async () => {
     const fresh = await readState();
     if (!fresh) {
       return;
@@ -755,5 +794,5 @@ function scheduleDungeonAttempt(timerKey, userId, sessionId, config, readState, 
     if (player.dungeonEnteredAt) {
       scheduleDungeonAttempt(timerKey, userId, sessionId, currentConfig, readState, saveState, io);
     }
-  });
+  }));
 }

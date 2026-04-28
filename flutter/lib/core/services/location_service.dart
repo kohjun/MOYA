@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:battery_plus/battery_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
+import 'permission_lock.dart';
 import 'socket_service.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -17,7 +18,7 @@ class LocationConfig {
   static final AndroidSettings androidMoving = AndroidSettings(
     accuracy: LocationAccuracy.high,
     intervalDuration: const Duration(seconds: 3),
-    distanceFilter: 5,  // 5m 이상 이동 시에만 갱신
+    distanceFilter: 10,
   );
 
   // 정지 중: 배터리 절약 모드
@@ -30,7 +31,7 @@ class LocationConfig {
   static final AppleSettings iosSettings = AppleSettings(
     accuracy: LocationAccuracy.high,
     activityType: ActivityType.fitness,
-    distanceFilter: 5,
+    distanceFilter: 10,
     pauseLocationUpdatesAutomatically: true,
     showBackgroundLocationIndicator: true,
   );
@@ -43,9 +44,11 @@ class GpsLocationService {
   StreamSubscription<Position>? _positionSub;
   Position? _lastPosition;
   DateTime? _lastSentAt;
+  DateTime? _lastBroadcastAt;
+  Position? _lastBroadcastPosition;
   bool _isTracking = false;
   bool _isMoving = false;
-  bool _sharingEnabled = true;
+  bool _publicSharingEnabled = false;
   String? _sessionId;
 
   final _battery = Battery();
@@ -65,13 +68,21 @@ class GpsLocationService {
     LocationPermission permission = await Geolocator.checkPermission();
 
     if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
+      // BLE/Audio 권한과 동시 진행 시 native 측 race 가능 → 전역 lock 으로 직렬화.
+      permission = await PermissionLock.run<LocationPermission>(() async {
+        try {
+          return await Geolocator.requestPermission();
+        } catch (e) {
+          debugPrint('[GPS] permission request failed: $e');
+          return LocationPermission.denied;
+        }
+      });
       if (permission == LocationPermission.denied) return false;
     }
 
     if (permission == LocationPermission.deniedForever) return false;
 
-    return true;  // whileInUse 또는 always
+    return true; // whileInUse 또는 always
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -129,11 +140,28 @@ class GpsLocationService {
     // ─────────────────────────────────────────────────────────────────────────
 
     _lastPosition = position;
-    _positionController.add(position);
 
     // 이동 상태 감지 (속도 0.5 m/s 이상이면 이동 중)
     final speed = position.speed;
     _isMoving = speed > 0.5;
+
+    // 다운스트림 throttle: 2초 또는 5m 이상 이동 시에만 broadcast
+    final nowBroadcast = DateTime.now();
+    final shouldBroadcast = _lastBroadcastAt == null ||
+        nowBroadcast.difference(_lastBroadcastAt!).inMilliseconds >= 2000 ||
+        (_lastBroadcastPosition != null &&
+            Geolocator.distanceBetween(
+                  _lastBroadcastPosition!.latitude,
+                  _lastBroadcastPosition!.longitude,
+                  position.latitude,
+                  position.longitude,
+                ) >=
+                5.0);
+    if (shouldBroadcast) {
+      _lastBroadcastAt = nowBroadcast;
+      _lastBroadcastPosition = position;
+      _positionController.add(position);
+    }
 
     // WebSocket으로 전송 (최소 1초 간격)
     final now = DateTime.now();
@@ -141,7 +169,7 @@ class GpsLocationService {
         ? 999999
         : now.difference(_lastSentAt!).inMilliseconds;
 
-    if (timeSinceLast >= 1000) {
+    if (timeSinceLast >= 3000) {
       _sendToSocket(position);
       _lastSentAt = now;
     }
@@ -151,14 +179,13 @@ class GpsLocationService {
   // 위치 공유 ON/OFF 제어
   // ─────────────────────────────────────────────────────────────────────────
   void setSharingEnabled(bool enabled) {
-    _sharingEnabled = enabled;
+    _publicSharingEnabled = enabled;
   }
 
   // ─────────────────────────────────────────────────────────────────────────
   // Socket으로 위치 전송
   // ─────────────────────────────────────────────────────────────────────────
   Future<void> _sendToSocket(Position position) async {
-    if (!_sharingEnabled) return;
     final sessionId = _sessionId;
     if (sessionId == null) return;
 
@@ -167,22 +194,23 @@ class GpsLocationService {
       batteryLevel = await _battery.batteryLevel;
     } catch (e) {
       debugPrint('[Battery] 배터리 레벨 읽기 실패: $e');
-      batteryLevel = null;  // null로 처리하고 계속 진행
+      batteryLevel = null; // null로 처리하고 계속 진행
     }
 
     final status = _isMoving ? 'moving' : 'stopped';
 
     SocketService().sendLocationWithSession(
       sessionId: sessionId,
-      lat:       position.latitude,
-      lng:       position.longitude,
-      accuracy:  position.accuracy,
-      altitude:  position.altitude,
-      speed:     position.speed.isNaN ? null : position.speed,
-      heading:   position.heading.isNaN ? null : position.heading,
-      source:    'gps',
-      battery:   batteryLevel,
-      status:    status,
+      lat: position.latitude,
+      lng: position.longitude,
+      accuracy: position.accuracy,
+      altitude: position.altitude,
+      speed: position.speed.isNaN ? null : position.speed,
+      heading: position.heading.isNaN ? null : position.heading,
+      source: 'gps',
+      battery: batteryLevel,
+      status: status,
+      visibility: _publicSharingEnabled ? 'public' : 'private',
     );
   }
 
@@ -197,20 +225,23 @@ class GpsLocationService {
 
       // 30초 동안 이동이 없으면 상태 업데이트
       int? battery;
-      try { battery = await _battery.batteryLevel; } catch (_) {}
+      try {
+        battery = await _battery.batteryLevel;
+      } catch (_) {}
 
       final pos = _lastPosition!;
       SocketService().sendLocationWithSession(
         sessionId: sessionId,
-        lat:       pos.latitude,
-        lng:       pos.longitude,
-        accuracy:  pos.accuracy,
-        altitude:  pos.altitude,
-        speed:     pos.speed.isNaN ? null : pos.speed,
-        heading:   pos.heading.isNaN ? null : pos.heading,
-        source:    'gps',
-        battery:   battery,
-        status:    _isMoving ? 'moving' : 'stopped',
+        lat: pos.latitude,
+        lng: pos.longitude,
+        accuracy: pos.accuracy,
+        altitude: pos.altitude,
+        speed: pos.speed.isNaN ? null : pos.speed,
+        heading: pos.heading.isNaN ? null : pos.heading,
+        source: 'gps',
+        battery: battery,
+        status: _isMoving ? 'moving' : 'stopped',
+        visibility: _publicSharingEnabled ? 'public' : 'private',
       );
     });
   }

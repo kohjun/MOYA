@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(flutter analyze *)",
+      "PowerShell(Get-ChildItem *)",
+      "PowerShell(Get-Command *)",
+      "Bash(flutter pub *)",
+      "Read(//c/MOYA/backend/src/websocket/handlers/**)"
+    ]
+  }
+}

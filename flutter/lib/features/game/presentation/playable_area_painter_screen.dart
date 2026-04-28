@@ -42,6 +42,18 @@ class _PlayableAreaPainterScreenState
   _LayoutStep _step = _LayoutStep.area;
   String? _selectedTeamId;
 
+  // _refreshOverlays는 비동기 await를 다수 포함한다. 빠르게 탭이 발생하면
+  // 두 refresh가 동시에 진행되어 clearOverlays/addOverlay가 뒤섞이고
+  // 방금 찍은 점이 사라지는 것처럼 보인다. 세대(generation) 카운터로
+  // 마지막 호출만 살아남게 한다.
+  int _refreshGen = 0;
+  bool _refreshRunning = false;
+  bool _refreshPending = false;
+
+  // NOverlayImage.fromWidget은 매 호출마다 위젯 → 이미지 합성을 한다.
+  // 같은 라벨/색이면 결과가 동일하므로 캐싱한다.
+  final Map<String, NOverlayImage> _iconCache = {};
+
   @override
   void initState() {
     super.initState();
@@ -55,7 +67,7 @@ class _PlayableAreaPainterScreenState
     ]);
     if (mounted) {
       setState(() => _isLoading = false);
-      unawaited(_refreshOverlays());
+      _scheduleRefresh();
     }
   }
 
@@ -129,37 +141,80 @@ class _PlayableAreaPainterScreenState
   }
 
   bool get _isFantasyWars =>
-      (_session?.gameType ?? 'among_us') == 'fantasy_wars_artifact';
+      (_session?.gameType ?? 'fantasy_wars_artifact') == 'fantasy_wars_artifact';
 
   int get _controlPointCount =>
       (_session?.gameConfig['controlPointCount'] as num?)?.toInt() ??
       _defaultControlPointCount;
 
-  Future<void> _refreshOverlays() async {
-    final controller = _mapController;
-    if (controller == null || !mounted) return;
-
-    await controller.clearOverlays();
-
-    await _drawAreaOverlays(controller);
-    await _drawControlPoints(controller);
-    await _drawSpawnZones(controller);
+  void _scheduleRefresh() {
+    if (_refreshRunning) {
+      _refreshPending = true;
+      return;
+    }
+    unawaited(_runRefreshLoop());
   }
 
-  Future<void> _drawAreaOverlays(NaverMapController controller) async {
+  Future<void> _runRefreshLoop() async {
+    _refreshRunning = true;
+    try {
+      do {
+        _refreshPending = false;
+        final myGen = ++_refreshGen;
+        await _refreshOverlays(myGen);
+      } while (_refreshPending && mounted);
+    } finally {
+      _refreshRunning = false;
+    }
+  }
+
+  Future<void> _refreshOverlays(int gen) async {
+    final controller = _mapController;
+    if (controller == null || !mounted) return;
+    if (gen != _refreshGen) return;
+
+    await controller.clearOverlays();
+    if (gen != _refreshGen || !mounted) return;
+
+    await _drawAreaOverlays(controller, gen);
+    if (gen != _refreshGen || !mounted) return;
+    await _drawControlPoints(controller, gen);
+    if (gen != _refreshGen || !mounted) return;
+    await _drawSpawnZones(controller, gen);
+  }
+
+  Future<NOverlayImage?> _iconFor({
+    required String cacheKey,
+    required Widget Function() builder,
+    required Size size,
+  }) async {
+    final cached = _iconCache[cacheKey];
+    if (cached != null) return cached;
+    final currentContext = context;
+    if (!currentContext.mounted) return null;
+    final icon = await NOverlayImage.fromWidget(
+      widget: builder(),
+      size: size,
+      context: currentContext,
+    );
+    _iconCache[cacheKey] = icon;
+    return icon;
+  }
+
+  Future<void> _drawAreaOverlays(NaverMapController controller, int gen) async {
     if (_areaVertices.isEmpty) return;
 
     for (var index = 0; index < _areaVertices.length; index += 1) {
-      final currentContext = context;
-      if (!currentContext.mounted) return;
-      final icon = await NOverlayImage.fromWidget(
-        widget: _NumberDot(
+      if (gen != _refreshGen || !mounted) return;
+      final icon = await _iconFor(
+        cacheKey: 'vertex:${index + 1}',
+        size: const Size(30, 30),
+        builder: () => _NumberDot(
           label: '${index + 1}',
           color: const Color(0xFF1D4ED8),
         ),
-        size: const Size(30, 30),
-        context: currentContext,
       );
+      if (gen != _refreshGen || !mounted || icon == null) return;
       await controller.addOverlay(
         NMarker(
           id: 'area_vertex_$index',
@@ -168,6 +223,8 @@ class _PlayableAreaPainterScreenState
         ),
       );
     }
+
+    if (gen != _refreshGen || !mounted) return;
 
     if (_areaVertices.length >= 3) {
       final coords = List<NLatLng>.from(_areaVertices);
@@ -193,18 +250,19 @@ class _PlayableAreaPainterScreenState
     }
   }
 
-  Future<void> _drawControlPoints(NaverMapController controller) async {
+  Future<void> _drawControlPoints(
+      NaverMapController controller, int gen) async {
     for (var index = 0; index < _controlPoints.length; index += 1) {
-      final currentContext = context;
-      if (!currentContext.mounted) return;
-      final icon = await NOverlayImage.fromWidget(
-        widget: _NumberDot(
+      if (gen != _refreshGen || !mounted) return;
+      final icon = await _iconFor(
+        cacheKey: 'cp:${index + 1}',
+        size: const Size(42, 42),
+        builder: () => _NumberDot(
           label: 'CP${index + 1}',
           color: const Color(0xFFF59E0B),
         ),
-        size: const Size(42, 42),
-        context: currentContext,
       );
+      if (gen != _refreshGen || !mounted || icon == null) return;
       await controller.addOverlay(
         NMarker(
           id: 'control_point_$index',
@@ -215,10 +273,11 @@ class _PlayableAreaPainterScreenState
     }
   }
 
-  Future<void> _drawSpawnZones(NaverMapController controller) async {
+  Future<void> _drawSpawnZones(NaverMapController controller, int gen) async {
     for (final team in _teams) {
       final center = _spawnCenters[team.teamId];
       if (center == null) continue;
+      if (gen != _refreshGen || !mounted) return;
 
       final color = _hexToColor(team.color);
       await controller.addOverlay(
@@ -232,17 +291,18 @@ class _PlayableAreaPainterScreenState
         ),
       );
 
-      final currentContext = context;
-      if (!currentContext.mounted) return;
-      final icon = await NOverlayImage.fromWidget(
-        widget: _SpawnBadge(
+      final selected = _selectedTeamId == team.teamId;
+      final icon = await _iconFor(
+        cacheKey:
+            'spawn:${team.teamId}:${team.displayName}:${team.color}:$selected',
+        size: const Size(96, 44),
+        builder: () => _SpawnBadge(
           label: team.displayName,
           color: color,
-          selected: _selectedTeamId == team.teamId,
+          selected: selected,
         ),
-        size: const Size(96, 44),
-        context: currentContext,
       );
+      if (gen != _refreshGen || !mounted || icon == null) return;
 
       await controller.addOverlay(
         NMarker(
@@ -257,27 +317,44 @@ class _PlayableAreaPainterScreenState
   void _onMapTapped(NPoint point, NLatLng latLng) {
     if (_isSaving || _isLoading) return;
 
+    bool changed = false;
+    String? rejectionMessage;
+
     setState(() {
       switch (_step) {
         case _LayoutStep.area:
           _areaVertices.add(latLng);
+          changed = true;
           break;
         case _LayoutStep.controlPoints:
           if (_controlPoints.length < _controlPointCount) {
             _controlPoints.add(latLng);
+            changed = true;
+          } else {
+            rejectionMessage =
+                '점령지가 이미 $_controlPointCount개 배치되었습니다. 실행 취소 후 다시 찍어주세요.';
           }
           break;
         case _LayoutStep.spawns:
-          final targetTeamId =
-              _selectedTeamId ?? (_teams.isNotEmpty ? _teams.first.teamId : null);
-          if (targetTeamId == null) return;
+          final targetTeamId = _selectedTeamId ??
+              (_teams.isNotEmpty ? _teams.first.teamId : null);
+          if (targetTeamId == null) {
+            rejectionMessage = '팀 정보가 아직 준비되지 않았습니다.';
+            return;
+          }
           _spawnCenters[targetTeamId] = latLng;
           _selectedTeamId = _nextUnplacedTeamId() ?? targetTeamId;
+          changed = true;
           break;
       }
     });
 
-    unawaited(_refreshOverlays());
+    if (rejectionMessage != null) {
+      _showMessage(rejectionMessage!);
+    }
+    if (changed) {
+      _scheduleRefresh();
+    }
   }
 
   void _undo() {
@@ -304,7 +381,7 @@ class _PlayableAreaPainterScreenState
       }
     });
 
-    unawaited(_refreshOverlays());
+    _scheduleRefresh();
   }
 
   void _clearCurrentStep() {
@@ -325,7 +402,7 @@ class _PlayableAreaPainterScreenState
       }
     });
 
-    unawaited(_refreshOverlays());
+    _scheduleRefresh();
   }
 
   Future<void> _moveToCurrentPosition() async {
@@ -481,7 +558,10 @@ class _PlayableAreaPainterScreenState
             selected: _selectedTeamId == team.teamId,
             selectedColor: _hexToColor(team.color).withValues(alpha: 0.18),
             onSelected: _step == _LayoutStep.spawns
-                ? (_) => setState(() => _selectedTeamId = team.teamId)
+                ? (_) {
+                    setState(() => _selectedTeamId = team.teamId);
+                    _scheduleRefresh();
+                  }
                 : null,
           ),
         )
@@ -518,7 +598,7 @@ class _PlayableAreaPainterScreenState
                   ),
                   onMapReady: (controller) {
                     _mapController = controller;
-                    unawaited(_refreshOverlays());
+                    _scheduleRefresh();
                   },
                   onMapTapped: _onMapTapped,
                 ),
@@ -532,27 +612,30 @@ class _PlayableAreaPainterScreenState
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          SegmentedButton<_LayoutStep>(
-                            showSelectedIcon: false,
-                            segments: const [
-                              ButtonSegment(
-                                value: _LayoutStep.area,
-                                label: Text('구역'),
-                              ),
-                              ButtonSegment(
-                                value: _LayoutStep.controlPoints,
-                                label: Text('점령지'),
-                              ),
-                              ButtonSegment(
-                                value: _LayoutStep.spawns,
-                                label: Text('팀 시작 지점'),
-                              ),
-                            ],
-                            selected: {_step},
-                            onSelectionChanged: (selection) {
-                              setState(() => _step = selection.first);
-                            },
-                          ),
+                          // 점령지/팀 시작 지점 단계는 fantasy_wars 전용.
+                          // color_chaser 등 다른 게임은 구역만 그리면 끝.
+                          if (_isFantasyWars)
+                            SegmentedButton<_LayoutStep>(
+                              showSelectedIcon: false,
+                              segments: const [
+                                ButtonSegment(
+                                  value: _LayoutStep.area,
+                                  label: Text('구역'),
+                                ),
+                                ButtonSegment(
+                                  value: _LayoutStep.controlPoints,
+                                  label: Text('점령지'),
+                                ),
+                                ButtonSegment(
+                                  value: _LayoutStep.spawns,
+                                  label: Text('팀 시작 지점'),
+                                ),
+                              ],
+                              selected: {_step},
+                              onSelectionChanged: (selection) {
+                                setState(() => _step = selection.first);
+                              },
+                            ),
                           const SizedBox(height: 12),
                           Text(_stepDescription()),
                           const SizedBox(height: 8),

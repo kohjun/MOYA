@@ -4,7 +4,53 @@ import * as sessionService from '../../services/sessionService.js';
 import { sendSosAlert, sendGeofenceAlert } from '../../services/fcmService.js';
 import { checkGeofences } from '../../services/geofenceService.js';
 import { EVENTS } from '../socketProtocol.js';
-import { ensureMediaRoomForSocket } from '../socketRuntime.js';
+import { ensureMediaRoomForSocket, readGameState } from '../socketRuntime.js';
+
+const stripMemberPrivateLocation = (member) => ({
+  ...member,
+  lastLocation: member.lastLocation?.visibility === 'public'
+    ? member.lastLocation
+    : null,
+});
+
+const activeRevealViewerIdsForTarget = (gameState, targetUserId, now = Date.now()) => {
+  const playerStates = gameState?.pluginState?.playerStates ?? {};
+  return Object.values(playerStates)
+    .filter((player) =>
+      player?.userId
+      && player.userId !== targetUserId
+      && player.trackedTargetUserId === targetUserId
+      && Number(player.revealUntil ?? 0) > now)
+    .map((player) => player.userId);
+};
+
+const visibleLocationSnapshotForUser = async (sessionId, viewerUserId, memberIds) => {
+  const gameState = await readGameState(sessionId);
+  const player = gameState?.pluginState?.playerStates?.[viewerUserId];
+  const visibleIds = new Set([viewerUserId]);
+  if (
+    player?.trackedTargetUserId
+    && Number(player.revealUntil ?? 0) > Date.now()
+    && memberIds.includes(player.trackedTargetUserId)
+  ) {
+    visibleIds.add(player.trackedTargetUserId);
+  }
+
+  const snapshot = await locationService.getSessionSnapshot(
+    sessionId,
+    [...visibleIds],
+  );
+  Object.keys(snapshot).forEach((targetUserId) => {
+    if (
+      targetUserId !== viewerUserId
+      && targetUserId !== player?.trackedTargetUserId
+      && snapshot[targetUserId]?.visibility !== 'public'
+    ) {
+      delete snapshot[targetUserId];
+    }
+  });
+  return snapshot;
+};
 
 export const registerSessionHandlers = ({ io, socket, mediaServer, userId, leaveSession }) => {
   socket.on(EVENTS.JOIN_SESSION, async ({ sessionId }) => {
@@ -28,12 +74,13 @@ export const registerSessionHandlers = ({ io, socket, mediaServer, userId, leave
       socket.currentSessionId = sessionId;
 
       const memberIds = members.map((m) => m.user_id);
-      const snapshot = await locationService.getSessionSnapshot(sessionId, memberIds);
+      const snapshot = await visibleLocationSnapshotForUser(sessionId, userId, memberIds);
       const joinedMember = members.find((m) => m.user_id === userId);
+      const membersForClient = members.map(stripMemberPrivateLocation);
 
       socket.emit(EVENTS.SESSION_SNAPSHOT, {
         sessionId,
-        members,
+        members: membersForClient,
         locations: snapshot,
       });
 
@@ -72,7 +119,18 @@ export const registerSessionHandlers = ({ io, socket, mediaServer, userId, leave
     const sessionId = socket.currentSessionId || payload.sessionId;
     if (!sessionId) return;
 
-    const { lat, lng, accuracy, altitude, speed, heading, source, battery, status } = payload;
+    const {
+      lat,
+      lng,
+      accuracy,
+      altitude,
+      speed,
+      heading,
+      source,
+      battery,
+      status,
+      visibility,
+    } = payload;
 
     if (typeof lat !== 'number' || typeof lng !== 'number') return;
     if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return;
@@ -83,6 +141,7 @@ export const registerSessionHandlers = ({ io, socket, mediaServer, userId, leave
         source: source || 'gps',
         battery,
         status: status || 'moving',
+        visibility: visibility === 'public' ? 'public' : 'private',
       });
 
       await redisClient.set(
@@ -98,7 +157,18 @@ export const registerSessionHandlers = ({ io, socket, mediaServer, userId, leave
         ...saved,
       };
 
-      socket.to(`session:${sessionId}`).emit(EVENTS.LOCATION_CHANGED, broadcastData);
+      if (saved.visibility === 'public') {
+        socket.to(`session:${sessionId}`).emit(EVENTS.LOCATION_CHANGED, broadcastData);
+      }
+
+      const gameState = await readGameState(sessionId);
+      const revealViewerIds = activeRevealViewerIdsForTarget(gameState, userId);
+      revealViewerIds.forEach((viewerUserId) => {
+        io.to(`user:${viewerUserId}`).emit(EVENTS.LOCATION_CHANGED, {
+          ...broadcastData,
+          visibility: 'revealed',
+        });
+      });
 
       // 지오펜스 DB 과부하 방지: 5초 throttle
       const geoThrottleKey = `throttle:geo:${sessionId}:${userId}`;

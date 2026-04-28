@@ -18,7 +18,11 @@ import '../../../../auth/data/auth_repository.dart';
 import '../../../../home/data/session_repository.dart';
 import '../../../../map/data/map_session_provider.dart';
 import '../../../../map/presentation/map_session_models.dart';
+import '../../../providers/ai_master_provider.dart';
+import '../../../providers/ble_duel_provider.dart';
 import '../../../providers/fantasy_wars_provider.dart';
+import '../../../widgets/ai_master_status_widget.dart';
+import '../../../widgets/ble_status_widget.dart';
 import 'duel/fw_duel_screen_v2.dart' show FwDuelScreen;
 import 'fantasy_wars_hud.dart';
 
@@ -48,7 +52,9 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
   String? _naverMapWidgetError;
   Timer? _naverMapWidgetTimer;
   bool _naverMapTimerStarted = false;
-  Key _mapViewKey = const ValueKey('naver_map_v1');
+  // GlobalKey 사용 — Stack 트리 내에서 위치가 바뀌어도 Element/State/SurfaceTexture 보존.
+  // retry 시에만 새 키로 교체해 PlatformView를 의도적으로 재생성.
+  GlobalKey _mapViewKey = GlobalKey(debugLabel: 'fw_naver_map');
 
   final Map<String, NCircleOverlay> _cpOverlays = {};
   final Map<String, NPolygonOverlay> _spawnZoneOverlays = {};
@@ -116,14 +122,16 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
       }
 
       socket.joinSession(widget.sessionId);
-      debugPrint('[FW-BOOT] joinSession emitted, currentSessionId=${socket.currentSessionId}');
+      debugPrint(
+          '[FW-BOOT] joinSession emitted, currentSessionId=${socket.currentSessionId}');
 
       ref.read(fantasyWarsProvider(widget.sessionId).notifier).refreshState();
       debugPrint('[FW-BOOT] game:request_state emitted');
 
       debugPrint('[FW-BOOT] naver map sdk init...');
       await AppInitializationService().ensureNaverMapInitialized();
-      debugPrint('[FW-BOOT] naver map sdk ready, authFailed=${AppInitializationService().isNaverMapAuthFailed}');
+      debugPrint(
+          '[FW-BOOT] naver map sdk ready, authFailed=${AppInitializationService().isNaverMapAuthFailed}');
 
       if (!mounted) {
         return;
@@ -207,10 +215,12 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
         );
         return;
       }
-      debugPrint('[FW-BOOT] no renderable state yet, delay=${delay.inMilliseconds}ms, retrying...');
+      debugPrint(
+          '[FW-BOOT] no renderable state yet, delay=${delay.inMilliseconds}ms, retrying...');
       notifier.refreshState();
     }
-    debugPrint('[FW-BOOT] warm init done — state still not renderable after retries');
+    debugPrint(
+        '[FW-BOOT] warm init done — state still not renderable after retries');
   }
 
   void _reconcileBootstrapState(FantasyWarsGameState fwState) {
@@ -257,18 +267,16 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
     return [
       _BootstrapStep(
         title: '실시간 서버 연결',
-        description: socketConnected
-            ? '소켓 연결이 완료되었습니다.'
-            : '백엔드와 소켓 연결을 수립하는 중입니다.',
+        description:
+            socketConnected ? '소켓 연결이 완료되었습니다.' : '백엔드와 소켓 연결을 수립하는 중입니다.',
         ready: socketConnected,
         required: true,
         icon: Icons.hub_rounded,
       ),
       _BootstrapStep(
         title: '세션 채널 구독',
-        description: sessionSubscribed
-            ? '현재 세션 채널에 참가했습니다.'
-            : '게임 세션 채널에 참가하는 중입니다.',
+        description:
+            sessionSubscribed ? '현재 세션 채널에 참가했습니다.' : '게임 세션 채널에 참가하는 중입니다.',
         ready: sessionSubscribed,
         required: true,
         icon: Icons.link_rounded,
@@ -284,9 +292,8 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
       ),
       _BootstrapStep(
         title: '지도 엔진 초기화',
-        description: mapReady
-            ? '네이버 지도 SDK 준비가 끝났습니다.'
-            : '지도 엔진과 전장 오버레이를 준비하는 중입니다.',
+        description:
+            mapReady ? '네이버 지도 SDK 준비가 끝났습니다.' : '지도 엔진과 전장 오버레이를 준비하는 중입니다.',
         ready: mapReady,
         required: true,
         icon: Icons.map_rounded,
@@ -295,25 +302,23 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
         title: '현재 위치 확보',
         description: gpsReady
             ? '현재 위치를 받았습니다.'
-            : 'GPS 위치를 잡는 중입니다. 이 단계는 백그라운드에서 이어집니다.',
+            : '거점 점령과 결투 판정에 GPS가 필요합니다. 위치 권한을 허용하고 GPS를 켜 주세요.',
         ready: gpsReady,
-        required: false,
+        required: true,
         icon: Icons.my_location_rounded,
       ),
       _BootstrapStep(
         title: '음성 채널 준비',
-        description: voiceReady
-            ? '음성 채널 준비가 완료되었습니다.'
-            : 'Mediasoup 음성 채널을 연결하는 중입니다.',
+        description:
+            voiceReady ? '음성 채널 준비가 완료되었습니다.' : 'Mediasoup 음성 채널을 연결하는 중입니다.',
         ready: voiceReady,
         required: false,
         icon: Icons.headset_mic_rounded,
       ),
       _BootstrapStep(
         title: '알림 채널 준비',
-        description: fcmReady
-            ? 'FCM 초기화가 완료되었습니다.'
-            : '푸시 알림 모듈을 백그라운드에서 준비하는 중입니다.',
+        description:
+            fcmReady ? 'FCM 초기화가 완료되었습니다.' : '푸시 알림 모듈을 백그라운드에서 준비하는 중입니다.',
         ready: fcmReady,
         required: false,
         icon: Icons.notifications_active_rounded,
@@ -368,7 +373,10 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
         _naverMapWidgetError = null;
         _naverMapTimerStarted = false;
         _mapController = null;
-        _mapViewKey = UniqueKey();
+        _mapViewKey = GlobalKey(
+          debugLabel:
+              'fw_naver_map_retry_${DateTime.now().millisecondsSinceEpoch}',
+        );
         _mapSdkReady = false;
       });
     }
@@ -748,6 +756,9 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
     for (final entry in mapState.members.entries) {
       final userId = entry.key;
       final member = entry.value;
+      if (!_shouldRenderPlayerMarker(userId, fwState, myId)) {
+        continue;
+      }
       if ((member.lat == 0 && member.lng == 0) ||
           mapState.eliminatedUserIds.contains(userId)) {
         continue;
@@ -800,6 +811,18 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
         return;
       }
     }
+  }
+
+  bool _shouldRenderPlayerMarker(
+    String userId,
+    FantasyWarsGameState fwState,
+    String? myId,
+  ) {
+    if (userId == myId) {
+      return false;
+    }
+    return fwState.myState.isRevealActive &&
+        fwState.myState.trackedTargetUserId == userId;
   }
 
   String _overlaySignature(
@@ -871,6 +894,9 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
 
     final memberIds = mapState.members.keys.toList()..sort();
     for (final userId in memberIds) {
+      if (!_shouldRenderPlayerMarker(userId, fwState, myId)) {
+        continue;
+      }
       final member = mapState.members[userId]!;
       buffer
         ..write(userId)
@@ -898,7 +924,8 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
     _lastOverlaySignature = signature;
     final syncId = ++_overlaySyncRequestId;
     _overlaySyncTimer?.cancel();
-    _overlaySyncTimer = Timer(const Duration(milliseconds: 80), () {
+    // 디바운스 완화: 잦은 rebuild 시 platform call 폭주 방지 (80ms → 600ms)
+    _overlaySyncTimer = Timer(const Duration(milliseconds: 600), () {
       if (!mounted) {
         return;
       }
@@ -1173,8 +1200,7 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
       if (fwState.eliminatedPlayerIds.contains(userId)) {
         return false;
       }
-      if (nearbyOnly &&
-          _duelProximityForUser(userId, mapState, myId) == null) {
+      if (nearbyOnly && _duelProximityForUser(userId, mapState, myId) == null) {
         return false;
       }
 
@@ -1416,9 +1442,8 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
           ? null
           : fwState.guilds[guildId]?.displayName ?? guildId;
       final isNearest = userIds.isNotEmpty && identical(userIds.first, userId);
-      final duelProximity = nearbyOnly
-          ? _duelProximityForUser(userId, mapState, myId)
-          : null;
+      final duelProximity =
+          nearbyOnly ? _duelProximityForUser(userId, mapState, myId) : null;
       return _TargetChoice(
         value: userId,
         label: nickname,
@@ -1430,13 +1455,11 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
             ? '자신'
             : nearbyOnly
                 ? (duelProximity?.source == 'ble' ? 'BLE' : '근접')
-            : enemy
-                ? '적'
-                : '아군',
+                : enemy
+                    ? '적'
+                    : '아군',
         helper: nearbyOnly
-            ? (duelProximity?.source == 'ble'
-                ? 'BLE 근접 확인'
-                : '근거리 결투 가능')
+            ? (duelProximity?.source == 'ble' ? 'BLE 근접 확인' : '근거리 결투 가능')
             : (isNearest ? '현재 위치 기준 가장 가까운 대상' : null),
         accentColor: userId == myId
             ? Colors.white
@@ -1661,7 +1684,10 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
     }
 
     String? memberId;
-    for (final candidateUserId in [event.primaryUserId, event.secondaryUserId]) {
+    for (final candidateUserId in [
+      event.primaryUserId,
+      event.secondaryUserId
+    ]) {
       if (candidateUserId != null &&
           mapState.members.containsKey(candidateUserId)) {
         memberId = candidateUserId;
@@ -2097,13 +2123,13 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
     final targetUserId = selectedTargetProximity != null
         ? selectedTargetUserId
         : await _pickMemberTarget(
-          title: '대결할 적 선택',
-          mapState: mapState,
-          fwState: fwState,
-          myId: myId,
-          enemy: true,
-          nearbyOnly: true,
-        );
+            title: '대결할 적 선택',
+            mapState: mapState,
+            fwState: fwState,
+            myId: myId,
+            enemy: true,
+            nearbyOnly: true,
+          );
     if (targetUserId == null) {
       return;
     }
@@ -2140,8 +2166,9 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
   }
 
   String _bleRequirementMessage(MapSessionState mapState) {
-    final strictBleRequired =
-        !ref.read(fantasyWarsProvider(widget.sessionId)).allowGpsFallbackWithoutBle;
+    final strictBleRequired = !ref
+        .read(fantasyWarsProvider(widget.sessionId))
+        .allowGpsFallbackWithoutBle;
     if (!strictBleRequired) {
       return '근거리 판정이 확인되지 않았습니다. 상대와 더 가까워져 주세요.';
     }
@@ -2180,8 +2207,7 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
         ref.read(fantasyWarsProvider(widget.sessionId)).bleEvidenceFreshnessMs;
     return mapState.bleContacts.values
         .where(
-          (contact) =>
-              nowMs - contact.seenAtMs <= bleFreshnessWindowMs,
+          (contact) => nowMs - contact.seenAtMs <= bleFreshnessWindowMs,
         )
         .length;
   }
@@ -2197,9 +2223,7 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
           return 'BLE 쨌 적 $nearbyEnemyCount명 감지';
         }
         final freshContacts = _freshBleContactCount(mapState);
-        return freshContacts > 0
-            ? 'BLE 쨌 근접 $freshContacts명 감지'
-            : 'BLE 쨌 탐색 중';
+        return freshContacts > 0 ? 'BLE 쨌 근접 $freshContacts명 감지' : 'BLE 쨌 탐색 중';
       case 'starting':
         return 'BLE 쨌 준비 중';
       case 'requestingPermission':
@@ -2369,7 +2393,8 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
                         width: 42,
                         height: 42,
                         decoration: BoxDecoration(
-                          color: const Color(0xFF0F766E).withValues(alpha: 0.18),
+                          color:
+                              const Color(0xFF0F766E).withValues(alpha: 0.18),
                           borderRadius: BorderRadius.circular(14),
                         ),
                         child: const Icon(
@@ -2426,10 +2451,10 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
                               }
                               await _focusRecentEvent(
                                 event,
-                                fwState:
-                                    ref.read(fantasyWarsProvider(widget.sessionId)),
-                                mapState:
-                                    ref.read(mapSessionProvider(widget.sessionId)),
+                                fwState: ref.read(
+                                    fantasyWarsProvider(widget.sessionId)),
+                                mapState: ref
+                                    .read(mapSessionProvider(widget.sessionId)),
                               );
                             }());
                           },
@@ -2506,8 +2531,8 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
     }
 
     return contacts.take(6).map((contact) {
-      final name =
-          memberLabels[contact.userId] ?? _memberLabel(mapState.members, contact.userId);
+      final name = memberLabels[contact.userId] ??
+          _memberLabel(mapState.members, contact.userId);
       final ageMs = nowMs - contact.seenAtMs;
       final freshnessLabel =
           ageMs <= fwState.bleEvidenceFreshnessMs ? 'fresh' : 'stale';
@@ -2542,7 +2567,8 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
     }
 
     return enemyIds.take(8).map((userId) {
-      final name = memberLabels[userId] ?? _memberLabel(mapState.members, userId);
+      final name =
+          memberLabels[userId] ?? _memberLabel(mapState.members, userId);
       final distance = _distanceToMember(userId, mapState, myId);
       final distanceLabel = distance != null && distance.isFinite
           ? '${distance.round()}m'
@@ -2601,11 +2627,10 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
       'starting' => 'starting',
       'requestingPermission' => 'requesting permission',
       'permissionDenied' => 'permission denied',
-      'bluetoothUnavailable' =>
-        mapState.blePresenceMessage == null ||
-                mapState.blePresenceMessage!.isEmpty
-            ? 'bluetooth unavailable'
-            : mapState.blePresenceMessage!,
+      'bluetoothUnavailable' => mapState.blePresenceMessage == null ||
+              mapState.blePresenceMessage!.isEmpty
+          ? 'bluetooth unavailable'
+          : mapState.blePresenceMessage!,
       'error' => mapState.blePresenceMessage == null ||
               mapState.blePresenceMessage!.isEmpty
           ? 'error'
@@ -2676,8 +2701,8 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
     }
 
     return contacts.take(6).map((contact) {
-      final name =
-          memberLabels[contact.userId] ?? _memberLabel(mapState.members, contact.userId);
+      final name = memberLabels[contact.userId] ??
+          _memberLabel(mapState.members, contact.userId);
       final ageMs = nowMs - contact.seenAtMs;
       final freshnessLabel =
           ageMs <= fwState.bleEvidenceFreshnessMs ? 'fresh' : 'stale';
@@ -2712,7 +2737,8 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
     }
 
     return enemyIds.take(8).map((userId) {
-      final name = memberLabels[userId] ?? _memberLabel(mapState.members, userId);
+      final name =
+          memberLabels[userId] ?? _memberLabel(mapState.members, userId);
       final distance = _distanceToMember(userId, mapState, myId);
       final distanceLabel = distance != null && distance.isFinite
           ? '${distance.round()}m'
@@ -2771,11 +2797,10 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
       'starting' => 'starting',
       'requestingPermission' => 'requesting permission',
       'permissionDenied' => 'permission denied',
-      'bluetoothUnavailable' =>
-        mapState.blePresenceMessage == null ||
-                mapState.blePresenceMessage!.isEmpty
-            ? 'bluetooth unavailable'
-            : mapState.blePresenceMessage!,
+      'bluetoothUnavailable' => mapState.blePresenceMessage == null ||
+              mapState.blePresenceMessage!.isEmpty
+          ? 'bluetooth unavailable'
+          : mapState.blePresenceMessage!,
       'error' => mapState.blePresenceMessage == null ||
               mapState.blePresenceMessage!.isEmpty
           ? 'error'
@@ -2802,7 +2827,8 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
 
   String _resolveErrorLabel(String? code) {
     if (code == 'BLE_PROXIMITY_REQUIRED') {
-      return _bleRequirementMessage(ref.read(mapSessionProvider(widget.sessionId)));
+      return _bleRequirementMessage(
+          ref.read(mapSessionProvider(widget.sessionId)));
     }
     return _errorLabel(code);
   }
@@ -2817,6 +2843,8 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
         'ENEMY_IN_ZONE' => '적이 거점 안에 있어 점령을 시작할 수 없습니다.',
         'BLOCKADED' => '현재 봉쇄된 거점입니다.',
         'TARGET_IN_DUEL' => '대결 중인 대상에게는 사용할 수 없습니다.',
+        'CHALLENGER_CAPTURING' => '점령 진행 중에는 대결을 신청할 수 없습니다. 먼저 점령을 취소해 주세요.',
+        'TARGET_CAPTURING' => '상대가 점령 중이라 대결을 신청할 수 없습니다.',
         'TARGET_NOT_ENEMY' => '적 대상이 필요합니다.',
         'TARGET_NOT_ALLY' => '아군 대상이 필요합니다.',
         'REVIVE_DISABLED_USE_DUNGEON' => '부활 시도는 던전에서만 가능합니다.',
@@ -2836,15 +2864,18 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
     debugPrint('[FW-BOOT] NaverMap widget timer started (15s)');
     _naverMapWidgetTimer = Timer(const Duration(seconds: 15), () {
       if (!mounted || _naverMapWidgetReady) return;
-      debugPrint('[FW-BOOT] NaverMap widget timer EXPIRED — onMapReady not received');
-      setState(() {
-        _naverMapWidgetError =
-            AppInitializationService().isNaverMapAuthFailed
-                ? 'NaverMap 인증에 실패했습니다.\n'
-                    '클라이언트 ID(ir4goe1vir)가 이 기기/환경에서 유효한지 확인해 주세요.'
-                : 'NaverMap 로딩 시간이 초과되었습니다.\n'
-                    '네트워크 상태를 확인하거나 다시 시도해 주세요.';
-      });
+      debugPrint(
+          '[FW-BOOT] NaverMap widget timer EXPIRED — onMapReady not received');
+      // 인증 실패가 아닌 경우 오버레이 없이 ready 처리 (에뮬레이터 등 느린 환경 대응)
+      if (AppInitializationService().isNaverMapAuthFailed) {
+        setState(() {
+          _naverMapWidgetError = 'NaverMap 인증에 실패했습니다.\n'
+              '클라이언트 ID(ir4goe1vir)가 이 기기/환경에서 유효한지 확인해 주세요.';
+        });
+      } else {
+        debugPrint('[FW-BOOT] assuming map is visible — clearing overlay');
+        setState(() => _naverMapWidgetReady = true);
+      }
     });
   }
 
@@ -2919,15 +2950,14 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
     );
   }
 
-
   Widget _buildLoadingView(
     BuildContext context, {
     required FantasyWarsGameState fwState,
     required MapSessionState mapState,
   }) {
     final steps = _bootstrapSteps(fwState, mapState);
-    final waiting =
-        _bootstrapError == null && !_isCriticalBootstrapReady(fwState, mapState);
+    final waiting = _bootstrapError == null &&
+        !_isCriticalBootstrapReady(fwState, mapState);
     final colorScheme = Theme.of(context).colorScheme;
 
     return ColoredBox(
@@ -2969,7 +2999,8 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
                         child: waiting
                             ? const Padding(
                                 padding: EdgeInsets.all(12),
-                                child: CircularProgressIndicator(strokeWidth: 3),
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 3),
                               )
                             : Icon(
                                 Icons.error_outline_rounded,
@@ -3076,15 +3107,16 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
     _reconcileBootstrapState(fwState);
     _handleStateSideEffects(fwState, mapState, myId);
 
-    final showBootstrapView =
-        !_isCriticalBootstrapReady(fwState, mapState) || _bootstrapError != null;
+    final showBootstrapView = !_isCriticalBootstrapReady(fwState, mapState) ||
+        _bootstrapError != null;
 
     // NaverMap 위젯이 처음 표시되는 순간 타이머를 시작한다.
     if (!showBootstrapView && !_naverMapTimerStarted && !_naverMapWidgetReady) {
       _naverMapTimerStarted = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && !_naverMapWidgetReady && _naverMapWidgetError == null) {
-          debugPrint('[FW-BOOT] game screen first frame rendered, starting NaverMap widget timer');
+          debugPrint(
+              '[FW-BOOT] game screen first frame rendered, starting NaverMap widget timer');
           _startNaverMapWidgetTimer();
         }
       });
@@ -3117,8 +3149,11 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
     final captureLabel = canShowCapture
         ? '${isCancellingCapture ? '점령 취소' : '점령 시작'} · ${capturePoint?.displayName ?? ''}'
         : null;
+    // 점령 진행 중에는 결투 신청이 백엔드에서 차단되므로 버튼도 숨긴다.
+    // 점령을 먼저 취소하면 같은 자리에 결투 버튼이 다시 노출된다.
     final duelLabel = fwState.myState.isAlive &&
             !fwState.myState.inDuel &&
+            fwState.myState.captureZone == null &&
             fwState.duel.phase == 'idle' &&
             duelCandidateIds.isNotEmpty
         ? '근접 결투'
@@ -3144,15 +3179,25 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
       },
       child: Scaffold(
         backgroundColor: Colors.black,
-        body: showBootstrapView
-            ? _buildLoadingView(
-                context,
-                fwState: fwState,
-                mapState: mapState,
-              )
-            : Stack(
-                children: [
-                  Positioned.fill(
+        // 분기 제거: showBootstrapView 토글 시 NaverMap이 unmount되어
+        // SurfaceTexture DISCONNECTED 가 발생하던 문제를 막기 위해
+        // body는 항상 Stack을 빌드한다. 부트스트랩 화면은 위에 덮는 오버레이로 처리.
+        body: Stack(
+          fit: StackFit.expand,
+          children: [
+            // ─── 0. 항상 살아있는 NaverMap 레이어 ─────────────────────
+            // LayoutBuilder + SizedBox.expand 로 명시적 제약을 강제하고,
+            // 부모 제약이 한순간 0,0이 되는 첫 measure 사이클을 흡수한다.
+            Positioned.fill(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  if (!constraints.hasBoundedWidth ||
+                      !constraints.hasBoundedHeight ||
+                      constraints.maxWidth == 0 ||
+                      constraints.maxHeight == 0) {
+                    return const SizedBox.shrink();
+                  }
+                  return SizedBox.expand(
                     child: NaverMap(
                       key: _mapViewKey,
                       options: NaverMapViewOptions(
@@ -3174,7 +3219,8 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
                         }
                       },
                       onMapReady: (controller) async {
-                        debugPrint('[FW-BOOT] NaverMap onMapReady fired — platform view ready');
+                        debugPrint(
+                            '[FW-BOOT] NaverMap onMapReady fired — platform view ready');
                         _mapController = controller;
                         _lastOverlaySignature = null;
                         _lastControlPointSignature = null;
@@ -3185,7 +3231,8 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
                             _naverMapWidgetError = null;
                             _naverMapWidgetTimer?.cancel();
                           });
-                          debugPrint('[FW-BOOT] NaverMap widget ready — first renderable state achieved');
+                          debugPrint(
+                              '[FW-BOOT] NaverMap widget ready — first renderable state achieved');
                         }
                         try {
                           controller.setLocationTrackingMode(
@@ -3195,169 +3242,238 @@ class _FantasyWarsGameScreenState extends ConsumerState<FantasyWarsGameScreen> {
                         _scheduleOverlaySync(fwState, mapState, myId);
                       },
                     ),
-                  ),
-                  FwTopHud(
-                    myState: fwState.myState,
-                    guilds: fwState.guilds,
-                    aliveCount: fwState.alivePlayerIds.length,
-                  ),
-                  FwWorldStatusPanel(
-                    myState: fwState.myState,
-                    dungeons: fwState.dungeons,
-                    memberLabels: memberLabels,
-                    bleSummary: _bleSummary(mapState, duelCandidateIds.length),
-                    duelDebugLines: _duelDebugLines(fwState),
-                  ),
-                  Positioned(
-                    top: MediaQuery.of(context).padding.top + 8,
-                    right: 12,
-                    child: SafeArea(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          if (isHost) ...[
-                            TextButton.icon(
-                              onPressed: () => unawaited(_openHostDebugSheet(
-                                fwState: fwState,
-                                mapState: mapState,
-                                memberLabels: memberLabels,
-                                duelCandidateIds: duelCandidateIds,
-                                myId: myId,
-                              )),
+                  );
+                },
+              ),
+            ),
+
+            // ─── 1. 게임 HUD/액션 레이어 ─────────────────────────────
+            // 부트스트랩 중에도 트리에는 유지(maintainState)하되 보이지 않게 한다.
+            // 입력은 IgnorePointer로 차단해 잘못된 탭이 흘러가지 않도록.
+            Visibility(
+              visible: !showBootstrapView,
+              maintainState: true,
+              maintainAnimation: true,
+              maintainSize: true,
+              maintainInteractivity: false,
+              child: IgnorePointer(
+                ignoring: showBootstrapView,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    FwTopHud(
+                      myState: fwState.myState,
+                      guilds: fwState.guilds,
+                      aliveCount: fwState.alivePlayerIds.length,
+                    ),
+                    FwWorldStatusPanel(
+                      myState: fwState.myState,
+                      dungeons: fwState.dungeons,
+                      memberLabels: memberLabels,
+                      bleSummary:
+                          _bleSummary(mapState, duelCandidateIds.length),
+                      duelDebugLines: _duelDebugLines(fwState),
+                    ),
+                    Positioned(
+                      top: MediaQuery.of(context).padding.top + 8,
+                      right: 12,
+                      child: SafeArea(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            if (isHost) ...[
+                              TextButton.icon(
+                                onPressed: () => unawaited(_openHostDebugSheet(
+                                  fwState: fwState,
+                                  mapState: mapState,
+                                  memberLabels: memberLabels,
+                                  duelCandidateIds: duelCandidateIds,
+                                  myId: myId,
+                                )),
+                                style: TextButton.styleFrom(
+                                  backgroundColor: const Color(0xCC0F766E),
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 6,
+                                  ),
+                                ),
+                                icon: const Icon(
+                                  Icons.admin_panel_settings_rounded,
+                                  size: 18,
+                                ),
+                                label: const Text('Log'),
+                              ),
+                              const SizedBox(height: 8),
+                            ],
+                            TextButton(
+                              onPressed: _confirmLeave,
                               style: TextButton.styleFrom(
-                                backgroundColor: const Color(0xCC0F766E),
+                                backgroundColor: Colors.black54,
                                 foregroundColor: Colors.white,
                                 padding: const EdgeInsets.symmetric(
                                   horizontal: 12,
                                   vertical: 6,
                                 ),
                               ),
-                              icon: const Icon(
-                                Icons.admin_panel_settings_rounded,
-                                size: 18,
-                              ),
-                              label: const Text('Log'),
+                              child: const Text('나가기'),
                             ),
-                            const SizedBox(height: 8),
                           ],
-                          TextButton(
-                            onPressed: _confirmLeave,
-                            style: TextButton.styleFrom(
-                              backgroundColor: Colors.black54,
-                              foregroundColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 12,
-                                vertical: 6,
+                        ),
+                      ),
+                    ),
+                    FwControlPointChips(
+                      controlPoints: fwState.controlPoints,
+                      myGuildId: fwState.myState.guildId,
+                      bottomOffset: chipOffset,
+                    ),
+                    FwActionDock(
+                      bottomOffset: chipOffset,
+                      captureLabel: captureLabel,
+                      onCapture: canShowCapture
+                          ? () => unawaited(
+                              _handleCaptureAction(fwState, mapState, myId))
+                          : null,
+                      duelLabel: duelLabel,
+                      onDuel: duelLabel == null
+                          ? null
+                          : () => unawaited(
+                              _handleDuelAction(fwState, mapState, myId)),
+                      dungeonLabel: dungeonLabel,
+                      onDungeon: (!fwState.myState.isAlive &&
+                              !fwState.myState.dungeonEntered)
+                          ? () => unawaited(_runAck(() {
+                                return ref
+                                    .read(
+                                      fantasyWarsProvider(widget.sessionId)
+                                          .notifier,
+                                    )
+                                    .enterDungeon();
+                              }))
+                          : null,
+                    ),
+                    if (fwState.myState.isAlive && !fwState.myState.inDuel)
+                      FwSkillButton(
+                        job: fwState.myState.job,
+                        skillUsedAt: fwState.myState.skillUsedAt,
+                        bottomOffset: chipOffset,
+                        onPressed: () => unawaited(
+                          _handleSkillAction(fwState, mapState, myId),
+                        ),
+                      ),
+                    if (fwState.duel.phase == 'challenged' &&
+                        fwState.duel.duelId != null)
+                      FwDuelChallengeDialog(
+                        duelId: fwState.duel.duelId!,
+                        opponentId: fwState.duel.opponentId,
+                        onAccept: () => unawaited(_runAck(() async {
+                          // 결투 수락 시 BLE 초기화 (결투 중 근접 감지용)
+                          if (myId != null) {
+                            final members = mapState.members.keys.toList();
+                            unawaited(
+                              ref.read(bleDuelProvider.notifier).startForDuel(
+                                sessionId: widget.sessionId,
+                                userId: myId,
+                                memberUserIds: members,
                               ),
-                            ),
-                            child: const Text('나가기'),
-                          ),
+                            );
+                          }
+                          return ref
+                              .read(fantasyWarsProvider(widget.sessionId)
+                                  .notifier)
+                              .acceptDuel(
+                                fwState.duel.duelId!,
+                                proximity: fwState.duel.opponentId == null
+                                    ? null
+                                    : _duelProximityForUser(
+                                        fwState.duel.opponentId!,
+                                        mapState,
+                                        myId,
+                                      )?.toMap(),
+                              );
+                        })),
+                        onReject: () => unawaited(_runAck(() {
+                          return ref
+                              .read(fantasyWarsProvider(widget.sessionId)
+                                  .notifier)
+                              .rejectDuel(fwState.duel.duelId!);
+                        })),
+                      ),
+                    if (fwState.duel.phase == 'challenging')
+                      FwChallengingIndicator(
+                        opponentId: fwState.duel.opponentId,
+                        onCancel: () => unawaited(_runAck(() {
+                          return ref
+                              .read(fantasyWarsProvider(widget.sessionId)
+                                  .notifier)
+                              .cancelDuel();
+                        })),
+                      ),
+                    if (fwState.duel.phase == 'in_game')
+                      FwDuelScreen(
+                        sessionId: widget.sessionId,
+                        duel: fwState.duel,
+                      ),
+                    if (fwState.duel.phase == 'result') ...[
+                      // 결투 종료 → BLE 정지
+                      Builder(builder: (_) {
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          ref.read(bleDuelProvider.notifier).stopAfterDuel();
+                        });
+                        return const SizedBox.shrink();
+                      }),
+                    ],
+                    if (fwState.duel.phase == 'result' &&
+                        fwState.duel.duelResult != null)
+                      FwDuelResultOverlay(
+                        result: fwState.duel.duelResult!,
+                        myId: myId,
+                        onClose: () => ref
+                            .read(
+                                fantasyWarsProvider(widget.sessionId).notifier)
+                            .clearDuelResult(),
+                      ),
+                    if (fwState.isFinished && fwState.winCondition != null)
+                      FwGameOverOverlay(
+                        winCondition: fwState.winCondition!,
+                        myGuildId: fwState.myState.guildId,
+                        guilds: fwState.guilds,
+                        onLeave: _confirmLeave,
+                      ),
+                    // 독립 서비스 상태 위젯 (우측 상단)
+                    Positioned(
+                      top: MediaQuery.of(context).padding.top + 8,
+                      right: 8,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          AiMasterStatusWidget(sessionId: widget.sessionId),
+                          const SizedBox(height: 4),
+                          const BleStatusWidget(),
                         ],
                       ),
                     ),
-                  ),
-                  FwControlPointChips(
-                    controlPoints: fwState.controlPoints,
-                    myGuildId: fwState.myState.guildId,
-                    bottomOffset: chipOffset,
-                  ),
-                  FwActionDock(
-                    bottomOffset: chipOffset,
-                    captureLabel: captureLabel,
-                    onCapture: canShowCapture
-                        ? () => unawaited(
-                            _handleCaptureAction(fwState, mapState, myId))
-                        : null,
-                    duelLabel: duelLabel,
-                    onDuel: duelLabel == null
-                        ? null
-                        : () => unawaited(
-                            _handleDuelAction(fwState, mapState, myId)),
-                    dungeonLabel: dungeonLabel,
-                    onDungeon: (!fwState.myState.isAlive &&
-                            !fwState.myState.dungeonEntered)
-                        ? () => unawaited(_runAck(() {
-                              return ref
-                                  .read(
-                                    fantasyWarsProvider(widget.sessionId)
-                                        .notifier,
-                                  )
-                                  .enterDungeon();
-                            }))
-                        : null,
-                  ),
-                  if (fwState.myState.isAlive && !fwState.myState.inDuel)
-                    FwSkillButton(
-                      job: fwState.myState.job,
-                      skillUsedAt: fwState.myState.skillUsedAt,
-                      bottomOffset: chipOffset,
-                      onPressed: () => unawaited(
-                        _handleSkillAction(fwState, mapState, myId),
-                      ),
-                    ),
-                  if (fwState.duel.phase == 'challenged' &&
-                      fwState.duel.duelId != null)
-                    FwDuelChallengeDialog(
-                      duelId: fwState.duel.duelId!,
-                      opponentId: fwState.duel.opponentId,
-                      onAccept: () => unawaited(_runAck(() {
-                        return ref
-                            .read(
-                                fantasyWarsProvider(widget.sessionId).notifier)
-                            .acceptDuel(
-                              fwState.duel.duelId!,
-                              proximity: fwState.duel.opponentId == null
-                                  ? null
-                                  : _duelProximityForUser(
-                                          fwState.duel.opponentId!,
-                                          mapState,
-                                          myId,
-                                        )
-                                      ?.toMap(),
-                            );
-                      })),
-                      onReject: () => unawaited(_runAck(() {
-                        return ref
-                            .read(
-                                fantasyWarsProvider(widget.sessionId).notifier)
-                            .rejectDuel(fwState.duel.duelId!);
-                      })),
-                    ),
-                  if (fwState.duel.phase == 'challenging')
-                    FwChallengingIndicator(
-                      opponentId: fwState.duel.opponentId,
-                      onCancel: () => unawaited(_runAck(() {
-                        return ref
-                            .read(
-                                fantasyWarsProvider(widget.sessionId).notifier)
-                            .cancelDuel();
-                      })),
-                    ),
-                  if (fwState.duel.phase == 'in_game')
-                    FwDuelScreen(
-                      sessionId: widget.sessionId,
-                      duel: fwState.duel,
-                    ),
-                  if (fwState.duel.phase == 'result' &&
-                      fwState.duel.duelResult != null)
-                    FwDuelResultOverlay(
-                      result: fwState.duel.duelResult!,
-                      myId: myId,
-                      onClose: () => ref
-                          .read(fantasyWarsProvider(widget.sessionId).notifier)
-                          .clearDuelResult(),
-                    ),
-                  if (fwState.isFinished && fwState.winCondition != null)
-                    FwGameOverOverlay(
-                      winCondition: fwState.winCondition!,
-                      myGuildId: fwState.myState.guildId,
-                      guilds: fwState.guilds,
-                      onLeave: _confirmLeave,
-                    ),
-                  if (!_naverMapWidgetReady)
-                    Positioned.fill(child: _buildMapLoadingOverlay()),
-                ],
+                  ],
+                ),
               ),
+            ),
+
+            // ─── 2. 부트스트랩 오버레이 ────────────────────────────
+            // NaverMap 위에 덮어서 표시. NaverMap은 unmount되지 않는다.
+            if (showBootstrapView)
+              Positioned.fill(
+                child: _buildLoadingView(
+                  context,
+                  fwState: fwState,
+                  mapState: mapState,
+                ),
+              ),
+
+            // ─── 3. 지도 로딩/에러 오버레이 (onMapReady 도착 전) ──
+            if (!_naverMapWidgetReady)
+              Positioned.fill(child: _buildMapLoadingOverlay()),
+          ],
+        ),
       ),
     );
   }
@@ -3578,8 +3694,7 @@ class _HostEventSectionState extends State<_HostEventSection> {
     final availableKinds = _availableKinds();
     final pinnedEvent = _pinnedEvent();
     final visibleEvents = _filteredEvents(
-      excludeEventKey:
-          pinnedEvent == null ? null : _eventKey(pinnedEvent),
+      excludeEventKey: pinnedEvent == null ? null : _eventKey(pinnedEvent),
     );
 
     return Container(
@@ -3976,9 +4091,8 @@ class _HostEventRow extends StatelessWidget {
                             ? Icons.push_pin_rounded
                             : Icons.push_pin_outlined,
                         size: 16,
-                        color: isPinned
-                            ? const Color(0xFFFDE68A)
-                            : Colors.white54,
+                        color:
+                            isPinned ? const Color(0xFFFDE68A) : Colors.white54,
                       ),
                       tooltip: isPinned ? 'Unpin event' : 'Pin event',
                     ),

@@ -8,7 +8,7 @@
  *   displayName : string   – human-readable label
  *   configSchema: Object   – { key: { type, default, min?, max? } }
  *   defaultConfig: Object  – flat map of schema defaults
- *   capabilities : string[] – feature tokens ('kill', 'vote', …)
+ *   capabilities : string[] – feature tokens ('territory', 'faction', …)
  *
  * Methods (all plugins must implement):
  *   startSession({ session, members, config, io })
@@ -26,34 +26,26 @@
  *   checkWinCondition(gameState)
  *     → { winner: string, reason: string } | null
  *
+ * Optional methods:
+ *   getVoicePolicy(gameState, { userId?: string }) → VoicePolicy
+ *     Returns how the voice room should behave for this session state.
+ *     Runtime calls this on game state changes to set mute/open modes.
+ *
+ * VoicePolicy shape:
+ * {
+ *   mode       : 'open' | 'muted' | 'team',  // 'team' = team-only voice channels
+ *   teamId?    : string,                     // required when mode === 'team' for a specific user
+ * }
+ *
  * GameState shape (stored in Redis under game:state:{sessionId}):
  * {
  *   gameType     : string,
  *   status       : 'in_progress' | 'finished',
- *   startedAt    : number,        // Date.now()
+ *   startedAt    : number,
  *   finishedAt   : number | null,
  *   alivePlayerIds: string[],
- *   pluginState  : Object,        // plugin-owned, opaque to the runtime
- * }
- *
- * RoleAssignment shape:
- * {
- *   userId     : string,
- *   role       : string,
- *   team       : string,
- *   privateData: Object,  // emitted only to this player via game:role_assigned
- * }
- *
- * EventContext shape (ctx passed to handleEvent):
- * {
- *   io         : SocketIO.Server,
- *   socket     : SocketIO.Socket,
- *   userId     : string,
- *   sessionId  : string,
- *   gameState  : GameState,
- *   saveState  : (gs: GameState) => Promise<void>,
+ *   pluginState  : Object,
  * }
  */
 
-// No runtime enforcement — this file is the living contract document.
 export {};

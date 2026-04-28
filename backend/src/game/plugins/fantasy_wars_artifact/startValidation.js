@@ -1,7 +1,7 @@
 'use strict';
 
-const DEFAULT_MIN_TOTAL_PLAYERS = 9;
-const MIN_PLAYERS_PER_TEAM = 2;
+const DEFAULT_MIN_TOTAL_PLAYERS = 3;
+const MIN_PLAYERS_PER_TEAM = 1;
 
 function getConfiguredTeams(config = {}) {
   const teams = Array.isArray(config.teams) ? config.teams : [];
@@ -26,7 +26,7 @@ export function validateFantasyWarsStart(members = [], config = {}) {
 
   const requiredTotalPlayers = Math.max(
     DEFAULT_MIN_TOTAL_PLAYERS,
-    Math.max(teams.length, 1) * 3,
+    Math.max(teams.length, 1) * 1,
   );
   const undersizedTeams = teams
     .filter((team) => (teamCounts[team.teamId] ?? 0) < MIN_PLAYERS_PER_TEAM)
@@ -42,7 +42,7 @@ export function validateFantasyWarsStart(members = [], config = {}) {
     error.details = {
       required: requiredTotalPlayers,
       current: members.length,
-      perTeamTarget: 3,
+      perTeamTarget: 1,
       teamCounts,
     };
     throw error;

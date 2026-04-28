@@ -12,6 +12,7 @@ import authRoutes from './routes/auth.js';
 import sessionRoutes from './routes/sessions.js';
 import geofenceRoutes from './routes/geofences.js';
 import gameRoutes from './routes/games.js';
+import mapRoutes from './routes/maps.js';
 import { startSessionCleaner } from './cron/sessionCleaner.js';
 
 dotenv.config();
@@ -34,6 +35,7 @@ const createFastifyApp = async () => {
   fastify.register(sessionRoutes, { prefix: '/sessions' });
   fastify.register(geofenceRoutes, { prefix: '/sessions' });
   fastify.register(gameRoutes, { prefix: '/games' });
+  fastify.register(mapRoutes, { prefix: '/maps' });
 
   fastify.get('/health', async () => {
     try {

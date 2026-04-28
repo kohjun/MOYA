@@ -79,8 +79,16 @@ Future<void> shutdownBackgroundService() async {
   try {
     final service = FlutterBackgroundService();
     try {
-      service.invoke('stopService');
-    } catch (_) {}
+      final running = await service.isRunning();
+      if (running) {
+        service.invoke('stopService');
+        // stopService 도달 시점은 service isolate에 따라 약간 지연된다.
+        // 다음 단계(configure 또는 main 부팅)에서 race가 나지 않도록 짧게 대기.
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      }
+    } catch (e) {
+      debugPrint('[Background] isRunning/invoke 중 예외 (무시): $e');
+    }
 
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('bg_active', false);

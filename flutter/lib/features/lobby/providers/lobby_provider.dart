@@ -218,6 +218,15 @@ class LobbyNotifier extends StateNotifier<LobbyState> {
     } on DioException catch (error) {
       debugPrint('[Lobby] startGame failed: $error');
 
+      // 503: LLM 과부하. 게임 자체는 시작될 수 있으므로 소켓 이벤트 먼저 확인.
+      final statusCode = error.response?.statusCode;
+      if (statusCode == 503) {
+        // 1초만 대기 후 소켓 확인
+        await Future<void>.delayed(const Duration(seconds: 1));
+        if (state.isGameStarted) return;
+        throw const LobbyStartGameException(code: 'LLM_UNAVAILABLE');
+      }
+
       // 타임아웃/연결 오류는 서버가 실제로 처리했을 수 있다.
       // 소켓 이벤트(game:started)로 게임 시작 여부를 확인하고자
       // 최대 3초까지 대기한다.

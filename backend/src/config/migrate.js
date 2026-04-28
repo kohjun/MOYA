@@ -108,103 +108,13 @@ const migrations = [
   `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS active_modules TEXT[] DEFAULT '{}'`,
   `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS module_configs JSONB DEFAULT '{}'::jsonb`,
 
-  // ─── 플레이어 역할 테이블 ─────────────────────────────────────────
-  `CREATE TABLE IF NOT EXISTS player_roles (
-    id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    session_id  UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    role        VARCHAR(50) NOT NULL,
-    team        VARCHAR(50),
-    assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(session_id, user_id)
-  )`,
-
-  // ─── 게임 라운드 테이블 ───────────────────────────────────────────
-  `CREATE TABLE IF NOT EXISTS game_rounds (
-    id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    session_id   UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    round_number INTEGER NOT NULL,
-    phase        VARCHAR(30) NOT NULL DEFAULT 'waiting',
-    started_at   TIMESTAMPTZ,
-    ended_at     TIMESTAMPTZ,
-    config       JSONB NOT NULL DEFAULT '{}'::jsonb
-  )`,
-
-  // ─── 미션 테이블 ──────────────────────────────────────────────────
-  `CREATE TABLE IF NOT EXISTS missions (
-    id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    session_id   UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    title        VARCHAR(100) NOT NULL,
-    description  TEXT,
-    location     GEOGRAPHY(POINT, 4326),
-    radius_m     FLOAT,
-    qr_code      VARCHAR(200),
-    reward_item  VARCHAR(100),
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
-  )`,
-
-  // ─── 플레이어 미션 완료 테이블 ───────────────────────────────────
-  `CREATE TABLE IF NOT EXISTS player_missions (
-    id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    mission_id   UUID NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
-    user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(mission_id, user_id)
-  )`,
-
-  // ─── Amongus 킬 로그 ─────────────────────────────────────────
-  `CREATE TABLE IF NOT EXISTS kill_logs (
-  id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  session_id   UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  killer_id    UUID NOT NULL REFERENCES users(id),
-  victim_id    UUID NOT NULL REFERENCES users(id),
-  zone         VARCHAR(100),
-  method       VARCHAR(20) DEFAULT 'proximity',
-  killed_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-)`,
-  `CREATE INDEX IF NOT EXISTS idx_kill_logs_session ON kill_logs(session_id)`,
-
-  // ─── 투표 세션 ───────────────────────────────────────────
-  `CREATE TABLE IF NOT EXISTS vote_sessions (
-  id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  session_id    UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  caller_id     UUID NOT NULL REFERENCES users(id),
-  body_id       UUID REFERENCES users(id),
-  reason        VARCHAR(20) NOT NULL,
-  phase         VARCHAR(20) NOT NULL DEFAULT 'discussion',
-  ejected_id    UUID REFERENCES users(id),
-  was_impostor  BOOLEAN,
-  started_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  ended_at      TIMESTAMPTZ
-)`,
-
-  // ─── 투표 내역 ───────────────────────────────────────────
-  `CREATE TABLE IF NOT EXISTS votes (
-  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  vote_session_id UUID NOT NULL REFERENCES vote_sessions(id) ON DELETE CASCADE,
-  voter_id        UUID NOT NULL REFERENCES users(id),
-  target_id       VARCHAR(50) NOT NULL,
-  is_pre_vote     BOOLEAN NOT NULL DEFAULT FALSE,
-  voted_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE(vote_session_id, voter_id)
-)`,
-
-  // ─── sessions 게임 설정 컬럼 추가 ────────────────────────
-  `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS game_type VARCHAR(50) DEFAULT 'among_us'`,
+  // ─── sessions 게임 설정 컬럼 ────────────────────────────────────
+  `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS game_type VARCHAR(50) DEFAULT 'fantasy_wars_artifact'`,
   `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS max_members INTEGER DEFAULT 50`,
-  `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS kill_cooldown INTEGER DEFAULT 30`,
-  `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS discussion_time INTEGER DEFAULT 90`,
-  `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS vote_time INTEGER DEFAULT 30`,
-  `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS mission_per_crew INTEGER DEFAULT 3`,
-  `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS impostor_count INTEGER DEFAULT 1`,
 
-  // ─── session_members 게임 상태 컬럼 추가 ─────────────────
-  `ALTER TABLE session_members ADD COLUMN IF NOT EXISTS is_alive BOOLEAN NOT NULL DEFAULT TRUE`,
-  `ALTER TABLE session_members ADD COLUMN IF NOT EXISTS game_role VARCHAR(20)`,
+  // ─── session_members 팀 컬럼 (Fantasy Wars 길드 배정용) ──────────
   `ALTER TABLE session_members ADD COLUMN IF NOT EXISTS game_team VARCHAR(20)`,
   `ALTER TABLE session_members ADD COLUMN IF NOT EXISTS pre_game_team VARCHAR(20)`,
-  `ALTER TABLE session_members ADD COLUMN IF NOT EXISTS currency INTEGER NOT NULL DEFAULT 0`,
-  `ALTER TABLE session_members ADD COLUMN IF NOT EXISTS zone VARCHAR(100)`,
 
   // ─── 플레이어블 영역 (폴리곤 좌표 배열) ───────────────────
   // [{lat: number, lng: number}, ...] 형태의 JSONB 배열

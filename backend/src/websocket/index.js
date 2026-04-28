@@ -2,12 +2,9 @@
 //
 // Socket.IO 서버 부트스트랩 및 도메인 핸들러 등록 허브.
 // 실제 이벤트 처리는 handlers/ 하위 모듈에 위임한다.
-//   - sessionHandlers      : session:join/leave, location:update, status:update, sos, voice:speaking, disconnect
-//   - proximityHandlers    : action:interact (PROXIMITY_KILL)
-//   - gameHandlers         : game:start/kill/emergency/report/vote/mission_complete/sabotage/request_state
-//   - aiHandlers           : game:ai_ask
-//   - roundVoteHandlers    : round:start, vote:open, vote:cast
-//   - meetingBusHandlers   : VoteSystem EventBus → Socket.IO 중계 (io 단위 1회 등록)
+//   - sessionHandlers : session:join/leave, location:update, status:update, sos, voice:speaking, disconnect
+//   - gameHandlers    : game:start/request_state + fantasy wars capture/skill/duel/dungeon
+//   - aiHandlers      : game:ai_ask
 
 import { Server } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-streams-adapter';
@@ -19,11 +16,10 @@ import { EVENTS } from './socketProtocol.js';
 export { EVENTS } from './socketProtocol.js';
 import { syncMediaRoomState } from './socketRuntime.js';
 import { registerSessionHandlers } from './handlers/sessionHandlers.js';
-import { registerProximityHandlers } from './handlers/proximityHandlers.js';
 import { registerGameHandlers } from './handlers/gameHandlers.js';
+import { registerColorChaserHandlers } from './handlers/colorChaserHandlers.js';
 import { registerAiHandlers } from './handlers/aiHandlers.js';
-import { registerRoundVoteHandlers } from './handlers/roundVoteHandlers.js';
-import { registerMeetingBusHandlers } from './handlers/meetingBusHandlers.js';
+import { registerSecurityHandlers } from './handlers/securityHandlers.js';
 
 let _io = null;
 export const getIo = () => _io;
@@ -89,14 +85,11 @@ export const createSocketServer = (
     }
 
     registerSessionHandlers({ io, socket, mediaServer, userId, leaveSession });
-    registerProximityHandlers({ io, socket, mediaServer, userId });
     registerGameHandlers({ io, socket, mediaServer, userId });
+    registerColorChaserHandlers({ io, socket, userId });
     registerAiHandlers({ socket, userId });
-    registerRoundVoteHandlers({ io, socket, userId });
+    registerSecurityHandlers({ socket, userId });
   });
-
-  // VoteSystem EventBus → Socket.IO 중계 (io 인스턴스 단위 1회)
-  registerMeetingBusHandlers({ io, mediaServer });
 
   return io;
 };

@@ -1,9 +1,12 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_ble_peripheral/flutter_ble_peripheral.dart';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
 import 'package:permission_handler/permission_handler.dart';
+
+import 'permission_lock.dart';
 
 enum BlePresenceLifecycleState {
   idle,
@@ -65,6 +68,10 @@ class FantasyWarsBlePresenceService {
   String? _userId;
   bool _shouldRun = false;
   bool _isRunning = false;
+  // hardware error → adapter restart 폭주 차단용.
+  DateTime? _lastRestartAt;
+  int _consecutiveFailures = 0;
+  bool _circuitBroken = false;
   Map<String, String> _tokenToUserId = const {};
   BlePresenceStatus _status =
       const BlePresenceStatus(state: BlePresenceLifecycleState.idle);
@@ -73,6 +80,15 @@ class FantasyWarsBlePresenceService {
   Stream<BlePresenceStatus> get statuses => _statusController.stream;
   bool get isRunning => _isRunning;
   BlePresenceStatus get status => _status;
+
+  static Future<bool> _isAndroidEmulator() async {
+    try {
+      final info = await DeviceInfoPlugin().androidInfo;
+      return !info.isPhysicalDevice;
+    } catch (_) {
+      return false;
+    }
+  }
 
   Future<void> start({
     required String sessionId,
@@ -83,6 +99,15 @@ class FantasyWarsBlePresenceService {
       _emitStatus(
         BlePresenceLifecycleState.unsupported,
         message: 'Android BLE scanning is only enabled on supported devices.',
+      );
+      return;
+    }
+
+    if (await _isAndroidEmulator()) {
+      debugPrint('[FW-BLE] emulator detected — BLE disabled');
+      _emitStatus(
+        BlePresenceLifecycleState.unsupported,
+        message: '에뮬레이터 환경 — BLE 비활성화',
       );
       return;
     }
@@ -136,13 +161,41 @@ class FantasyWarsBlePresenceService {
     _emitStatus(BlePresenceLifecycleState.idle);
   }
 
+  /// 권한이 거부된 후 사용자가 시스템 설정에서 권한을 허용한 뒤
+  /// UI에서 재시도 버튼을 누를 때 호출. 마지막 start() 인자를 그대로 재사용한다.
+  Future<void> retry() async {
+    if (_status.state != BlePresenceLifecycleState.permissionDenied
+        && _status.state != BlePresenceLifecycleState.bluetoothUnavailable
+        && _status.state != BlePresenceLifecycleState.error) {
+      return;
+    }
+    final sessionId = _sessionId;
+    final userId = _userId;
+    if (sessionId == null || userId == null) {
+      return;
+    }
+    await start(
+      sessionId: sessionId,
+      userId: userId,
+      memberUserIds: _tokenToUserId.values,
+    );
+  }
+
   void _ensureStatusSubscription() {
     _statusSub ??= _ble.statusStream.listen((status) {
-      if (!_shouldRun) {
+      if (!_shouldRun || _circuitBroken) {
         return;
       }
 
       if (status == BleStatus.ready) {
+        // adapter 재시작 시 ready 가 빠르게 토글되며 _restartIfReady 가 폭주.
+        // 1초 미만 재호출은 무시.
+        final now = DateTime.now();
+        if (_lastRestartAt != null &&
+            now.difference(_lastRestartAt!) < const Duration(seconds: 1)) {
+          return;
+        }
+        _lastRestartAt = now;
         unawaited(_restartIfReady());
         return;
       }
@@ -168,12 +221,24 @@ class FantasyWarsBlePresenceService {
       Permission.bluetoothAdvertise,
       Permission.location,
     ];
-    final results = await permissions.request();
-    return results.values.every((status) => status.isGranted);
+    // 다른 서비스(Audio, Geolocator)와 동시 요청 시 permission_handler 가
+    // race 에러를 던지므로 전역 lock 으로 직렬화.
+    return PermissionLock.run(() async {
+      try {
+        final results = await permissions.request();
+        return results.values.every((status) => status.isGranted);
+      } catch (e) {
+        debugPrint('[BLE] permission request failed: $e');
+        return false;
+      }
+    });
   }
 
   Future<void> _restartIfReady() async {
-    if (!_shouldRun || _sessionId == null || _userId == null) {
+    if (!_shouldRun ||
+        _circuitBroken ||
+        _sessionId == null ||
+        _userId == null) {
       return;
     }
     if (_ble.status != BleStatus.ready) {
@@ -187,6 +252,25 @@ class FantasyWarsBlePresenceService {
     final advertisingReady = await _startAdvertising();
     final scanningReady = await _startScanning();
     _isRunning = advertisingReady && scanningReady;
+
+    if (!_isRunning) {
+      // 연속 실패 3회면 회로 차단 — 이 세션 동안 BLE 재시도 중단.
+      // 에뮬레이터 / 어댑터 불안정 환경에서 Hardware Error 무한 루프 차단.
+      _consecutiveFailures += 1;
+      if (_consecutiveFailures >= 3) {
+        _circuitBroken = true;
+        debugPrint(
+            '[FW-BLE] circuit broken after 3 failures — disabling BLE for this session');
+        _emitStatus(
+          BlePresenceLifecycleState.error,
+          message: 'BLE 어댑터 불안정 — 이 세션에서 BLE 비활성화',
+        );
+        return;
+      }
+    } else {
+      _consecutiveFailures = 0;
+    }
+
     _emitStatus(
       _isRunning
           ? BlePresenceLifecycleState.running
@@ -204,14 +288,21 @@ class FantasyWarsBlePresenceService {
       return false;
     }
 
-    final advertiseData = AdvertiseData(
-      serviceUuid: serviceUuid,
-      localName: _localNameFor(userId),
-      manufacturerId: _manufacturerId,
-      manufacturerData: Uint8List.fromList(
-        _payloadBytesFor(sessionId, userId),
-      ),
-    );
+    final AdvertiseData advertiseData;
+    try {
+      advertiseData = AdvertiseData(
+        serviceUuid: serviceUuid,
+        localName: _localNameFor(userId),
+        manufacturerId: _manufacturerId,
+        manufacturerData: Uint8List.fromList(
+          _payloadBytesFor(sessionId, userId),
+        ),
+      );
+    } catch (e) {
+      // payload 생성 실패 시 advertising 자체 포기 (무한 재시도 방지).
+      debugPrint('[FW-BLE] advertise data build failed: $e');
+      return false;
+    }
 
     final settings = AdvertiseSettings(
       advertiseMode: AdvertiseMode.advertiseModeBalanced,
@@ -224,10 +315,19 @@ class FantasyWarsBlePresenceService {
     } catch (_) {}
 
     try {
-      await _peripheral.start(
-        advertiseData: advertiseData,
-        advertiseSettings: settings,
-      );
+      // hardware error / adapter restart 시 native 측이 응답 없이 hang 되는 경우
+      // 가 있어 5초 timeout 으로 강제 cut. 다음 status 변동에서 재시도된다 (백오프 적용).
+      await _peripheral
+          .start(
+            advertiseData: advertiseData,
+            advertiseSettings: settings,
+          )
+          .timeout(
+            const Duration(seconds: 5),
+            onTimeout: () {
+              throw TimeoutException('BLE advertise start timeout');
+            },
+          );
       return true;
     } catch (error) {
       debugPrint('[FW-BLE] advertise start failed: $error');
@@ -331,13 +431,20 @@ class FantasyWarsBlePresenceService {
       hash = (hash * prime) & mask;
     }
 
-    return hash.toRadixString(16).padLeft(16, '0');
+    // Dart int 은 64-bit signed 라 mask 후에도 음수가 될 수 있음.
+    // toRadixString(16) 이 음수면 "-..." 접두사를 붙여 잘못된 hex 가 되므로
+    // 항상 unsigned 로 변환.
+    return hash.toUnsigned(64).toRadixString(16).padLeft(16, '0');
   }
 
   List<int> _hexToBytes(String value) {
+    // 비-hex 문자 (음수 부호 등) 가 들어와도 robust 하게: 정규식으로 제거.
+    // 홀수 길이 시 앞에 0 패딩 (substring RangeError 방지).
+    final cleaned = value.replaceAll(RegExp(r'[^0-9a-fA-F]'), '');
+    final normalized = cleaned.length.isOdd ? '0$cleaned' : cleaned;
     final bytes = <int>[];
-    for (var index = 0; index < value.length; index += 2) {
-      bytes.add(int.parse(value.substring(index, index + 2), radix: 16));
+    for (var index = 0; index + 2 <= normalized.length; index += 2) {
+      bytes.add(int.parse(normalized.substring(index, index + 2), radix: 16));
     }
     return bytes;
   }

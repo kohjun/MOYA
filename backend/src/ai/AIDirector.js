@@ -1,7 +1,7 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 import { chat } from './LLMClient.js';
-import { SYSTEM_PROMPT, PROMPTS, FW_SYSTEM_PROMPT, FW_PROMPTS } from './prompt.js';
+import { FW_SYSTEM_PROMPT, FW_PROMPTS } from './prompt.js';
 import { retrieve } from './rag/ragRetriever.js';
 import { GamePluginRegistry } from '../game/index.js';
 import { redisClient } from '../config/redis.js';
@@ -169,13 +169,18 @@ async function ask(room, player, question) {
       return buildAskFailure(new Error('Missing GEMINI_API_KEY'));
     }
 
-    const plugin = GamePluginRegistry.get(room.gameType || 'among_us');
+    const plugin = GamePluginRegistry.get(room.gameType || 'fantasy_wars_artifact');
     const phase = plugin.getCurrentPhase(room);
+    // 플러그인이 자기 지식베이스에 맞는 role 태그를 결정한다 (없으면 player.roleId/team 폴백).
+    const knowledgeRole = plugin.getKnowledgeRole?.(player, room)
+      ?? player.roleId
+      ?? player.team
+      ?? 'all';
 
     const { context, sources, found } = await retrieve(
       question,
       room.gameType,
-      player.team === 'impostor' ? 'impostor' : 'crew',
+      knowledgeRole,
       phase,
     );
 
@@ -223,99 +228,6 @@ async function cleanupRoom(roomId) {
   }
 }
 
-async function onGameStart(room) {
-  const playerCount = room.players?.size ?? room.players?.length ?? 0;
-  const impostorCount =
-    room.impostors?.length ??
-    [...(room.players?.values?.() ?? [])].filter(
-      (player) => player.team === 'impostor',
-    ).length;
-
-  // 한국어 3문장(최대 120자)이 중간에 잘리지 않도록 maxTokens를 넉넉히 설정.
-  // Gemini 기본 500 → 한국어 토큰 밀도 특성상 가끔 잘리는 이슈 방지.
-  return chat({
-    prompt: PROMPTS.gameStart(playerCount, impostorCount),
-    systemPrompt: SYSTEM_PROMPT,
-    model: 'fast',
-    maxTokens: 1024,
-  });
-}
-
-async function onKill(room, killer, target) {
-  if (await isOnCooldown(`${room.roomId}_kill`, 3000)) return null;
-
-  const alivePlayerIds = room.alivePlayerIds ?? [];
-  const impostors = room.impostors ?? [];
-  const remainingCrew =
-    room.aliveCrew?.length ??
-    alivePlayerIds.filter((id) => !impostors.includes(id)).length;
-  const remainingImpostors =
-    room.aliveImpostors?.length ??
-    alivePlayerIds.filter((id) => impostors.includes(id)).length;
-
-  return chat({
-    prompt: PROMPTS.kill(
-      target.nickname,
-      target.zone,
-      room.killLog.length,
-      remainingCrew,
-      remainingImpostors,
-    ),
-    systemPrompt: SYSTEM_PROMPT,
-    model: 'fast',
-  });
-}
-
-async function onMeeting(room, caller, reason, body = null) {
-  const prompt =
-    reason === 'report' && body
-      ? PROMPTS.bodyReport(
-          caller.nickname,
-          body.nickname,
-          body.zone,
-          room.meetingCount,
-        )
-      : PROMPTS.emergencyMeeting(caller.nickname, room.meetingCount);
-
-  return chat({ prompt, systemPrompt: SYSTEM_PROMPT, model: 'fast' });
-}
-
-async function onVoteResult(room, result, ejected) {
-  const cooldownGuide = '다음 투표는 30초 뒤에 다시 열립니다.';
-
-  if (!ejected) {
-    if (result.isTied) {
-      return `AI MOYA: 투표 결과 동점으로 아무도 추방되지 않았습니다. ${cooldownGuide}`;
-    }
-    return `AI MOYA: 투표 결과 아무도 추방되지 않았습니다. ${cooldownGuide}`;
-  }
-
-  const nickname = ejected.nickname ?? ejected.userId ?? '플레이어';
-  const voteCount =
-    typeof result.topCount === 'number' && result.topCount > 0
-      ? `${result.topCount}표로 `
-      : '';
-
-  if (result.wasImpostor) {
-    return `AI MOYA: 투표 결과 ${nickname}님이 ${voteCount}추방되었습니다. 정체는 임포스터였습니다. ${cooldownGuide}`;
-  }
-
-  return `AI MOYA: 투표 결과 ${nickname}님이 ${voteCount}추방되었습니다. 정체는 크루원이었습니다. ${cooldownGuide}`;
-}
-
-async function onGameEnd(room, result) {
-  const allImpostors = [...room.players.values()]
-    .filter((player) => player.team === 'impostor')
-    .map((player) => player.nickname);
-
-  const prompt =
-    result.winner === 'crew'
-      ? PROMPTS.crewWin(result.reason, allImpostors)
-      : PROMPTS.impostorWin(allImpostors);
-
-  return chat({ prompt, systemPrompt: SYSTEM_PROMPT, model: 'fast' });
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Fantasy Wars 이벤트 핸들러
 // ─────────────────────────────────────────────────────────────────────────────
@@ -323,12 +235,17 @@ async function onGameEnd(room, result) {
 async function fwOnGameStart(room) {
   const guildCount  = room.pluginState?.guilds ? Object.keys(room.pluginState.guilds).length : 3;
   const playerCount = room.alivePlayerIds?.length ?? 0;
-  return chat({
-    prompt: FW_PROMPTS.gameStart(guildCount, playerCount),
-    systemPrompt: FW_SYSTEM_PROMPT,
-    model: 'fast',
-    maxTokens: 1024,
-  });
+  try {
+    return await chat({
+      prompt: FW_PROMPTS.gameStart(guildCount, playerCount),
+      systemPrompt: FW_SYSTEM_PROMPT,
+      model: 'fast',
+      maxTokens: 1024,
+    });
+  } catch (error) {
+    console.warn('[AIDirector] fwOnGameStart suppressed:', error?.message ?? error);
+    return null;
+  }
 }
 
 async function fwOnCpCaptured(room, guildId, cpName) {
@@ -388,11 +305,6 @@ export {
   ask,
   clearHistory,
   cleanupRoom,
-  onGameStart,
-  onKill,
-  onMeeting,
-  onVoteResult,
-  onGameEnd,
   fwOnGameStart,
   fwOnCpCaptured,
   fwOnDuelResult,

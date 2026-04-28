@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:mediasoup_client_flutter/mediasoup_client_flutter.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import 'permission_lock.dart';
 import 'socket_service.dart';
 
 // VAD 설정
@@ -390,7 +391,15 @@ class MediaSoupAudioService {
       return;
     }
 
-    final permission = await Permission.microphone.request();
+    // 다른 서비스(BLE, Geolocator)와 동시 요청 시 race 에러 발생 → 직렬화.
+    final permission = await PermissionLock.run<PermissionStatus>(() async {
+      try {
+        return await Permission.microphone.request();
+      } catch (e) {
+        debugPrint('[MediaSoup] microphone permission request failed: $e');
+        return PermissionStatus.denied;
+      }
+    });
     if (!permission.isGranted) {
       debugPrint('[MediaSoup] microphone permission denied');
       return;

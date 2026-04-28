@@ -166,7 +166,7 @@ class Session {
   final Map<String, dynamic> moduleConfigs;
   final String gameStatus; // 'lobby' | 'playing'
 
-  /// 플러그인 gameType ('among_us', 'fantasy_wars', …)
+  /// 플러그인 gameType (e.g. 'fantasy_wars_artifact')
   final String gameType;
   /// 플러그인별 설정 맵
   final Map<String, dynamic> gameConfig;
@@ -174,8 +174,6 @@ class Session {
   final String gameVersion;
 
   // ── 게임 설정 ────────────────────────────────────────────────────────────
-  final int killCooldown;
-  final int emergencyCooldown;
   final List<Map<String, double>>? playableArea;
   final List<FantasyWarsTeamConfig> fantasyWarsTeams;
   final List<Map<String, double>> fantasyWarsControlPoints;
@@ -193,19 +191,14 @@ class Session {
     this.activeModules = const [],
     this.moduleConfigs = const {},
     this.gameStatus = 'lobby',
-    this.gameType = 'among_us',
+    this.gameType = 'fantasy_wars_artifact',
     this.gameConfig = const {},
     this.gameVersion = '1.0',
-    this.killCooldown = 30,
-    this.emergencyCooldown = 90,
     this.playableArea,
     this.fantasyWarsTeams = const [],
     this.fantasyWarsControlPoints = const [],
     this.fantasyWarsSpawnZones = const [],
   });
-
-  /// AmongUs 내부 전용 — 외부에서 호출 금지
-  SessionType get sessionType => SessionType.defaultType;
 
   factory Session.fromMap(Map<String, dynamic> m) {
     final rawMembers = m['members'] as List<dynamic>? ?? [];
@@ -218,17 +211,6 @@ class Session {
     final rawModules = m['active_modules'] as List<dynamic>? ?? [];
     final rawConfigs = m['module_configs'] as Map<String, dynamic>? ?? {};
 
-    // kill_cooldown: 전용 컬럼 우선, module_configs 폴백
-    final killCd = (m['kill_cooldown'] as num?)?.toInt()
-        ?? (rawConfigs['killCooldown'] as num?)?.toInt()
-        ?? 30;
-
-    // discussion_time: 전용 컬럼 우선, module_configs 폴백 (emergencyCooldown 키)
-    final emergencyCd = (m['discussion_time'] as num?)?.toInt()
-        ?? (rawConfigs['emergencyCooldown'] as num?)?.toInt()
-        ?? (rawConfigs['discussionTime'] as num?)?.toInt()
-        ?? 90;
-
     // playable_area: [{lat, lng}, ...] 형태의 JSONB 배열 파싱
     final rawArea = m['playable_area'] as List<dynamic>?;
     final playableArea = rawArea
@@ -240,8 +222,7 @@ class Session {
         .toList();
 
     final rawGameType = m['game_type'] as String? ?? '';
-    // 하위호환: game_type이 비어있으면 activeModules 기반 레거시 매핑
-    final resolvedGameType = rawGameType.isEmpty ? 'among_us' : rawGameType;
+    final resolvedGameType = rawGameType.isEmpty ? 'fantasy_wars_artifact' : rawGameType;
     final gameConfig = (m['game_config'] as Map<String, dynamic>?) ?? {};
     final rawFantasyTeams = gameConfig['teams'] as List<dynamic>? ?? const [];
     final rawControlPoints =
@@ -268,8 +249,6 @@ class Session {
       gameType: resolvedGameType,
       gameConfig: gameConfig,
       gameVersion: m['game_version'] as String? ?? '1.0',
-      killCooldown: killCd,
-      emergencyCooldown: emergencyCd,
       playableArea: playableArea,
       fantasyWarsTeams: rawFantasyTeams
           .whereType<Map<String, dynamic>>()
@@ -291,31 +270,6 @@ class Session {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SessionType — AmongUs 레거시 전용. 신규 게임은 GameUiPluginRegistry를 사용.
-// ─────────────────────────────────────────────────────────────────────────────
-
-enum SessionType {
-  defaultType,
-  chase,
-  verbal,
-  location;
-
-  /// AmongUs GameMainScreen 내부에서만 사용. 신규 코드에서 호출 금지.
-  List<String> toModules() {
-    switch (this) {
-      case SessionType.defaultType:
-        return [];
-      case SessionType.chase:
-        return ['proximity', 'tag', 'team'];
-      case SessionType.verbal:
-        return ['vote', 'round', 'team'];
-      case SessionType.location:
-        return ['mission', 'item'];
-    }
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Repository
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -332,7 +286,7 @@ class SessionRepository {
     String name,
     int durationHours,
     int maxMembers, {
-    String gameType = 'among_us',
+    String gameType = 'fantasy_wars_artifact',
     Map<String, dynamic> gameConfig = const {},
     String gameVersion = '1.0',
   }) async {
@@ -483,6 +437,10 @@ class SessionRepository {
   Future<void> startGame(String sessionId) async {
     await _api.post('/sessions/$sessionId/start');
   }
+
+  Future<void> retryLlm(String sessionId) async {
+    await _api.post('/sessions/$sessionId/retry-llm');
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -513,7 +471,7 @@ class SessionListNotifier extends AsyncNotifier<List<Session>> {
     String name, {
     int durationHours = 1,
     int maxMembers = 3,
-    String gameType = 'among_us',
+    String gameType = 'fantasy_wars_artifact',
     Map<String, dynamic> gameConfig = const {},
     String gameVersion = '1.0',
   }) async {

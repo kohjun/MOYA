@@ -15,6 +15,7 @@ export const saveLocation = async (userId, sessionId, locationData) => {
     source = 'gps',
     battery = null,
     status = 'moving',
+    visibility = 'private',
   } = locationData;
 
   // PostGIS POINT 포맷: ST_MakePoint(경도, 위도) — 경도가 먼저!
@@ -28,7 +29,18 @@ export const saveLocation = async (userId, sessionId, locationData) => {
   );
 
   // Redis에 최신 위치 캐시 (30분 TTL)
-  const cachePayload = { lat, lng, accuracy, speed, heading, source, battery, status, ts: Date.now() };
+  const cachePayload = {
+    lat,
+    lng,
+    accuracy,
+    speed,
+    heading,
+    source,
+    battery,
+    status,
+    visibility,
+    ts: Date.now(),
+  };
   await setCache(`location:${sessionId}:${userId}`, cachePayload, 1800);
 
   return cachePayload;

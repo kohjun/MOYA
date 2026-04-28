@@ -225,6 +225,8 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
           return '게임 시작 실패: 길드 시작 지점을 모두 배치해주세요.';
         case 'CONTROL_POINT_LOCATIONS_REQUIRED':
           return '게임 시작 실패: 점령지 좌표가 올바르지 않습니다.';
+        case 'LLM_UNAVAILABLE':
+          return 'AI 서버가 일시적으로 과부하 상태입니다. 잠시 후 다시 시도해주세요.';
       }
     }
 
@@ -238,7 +240,7 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
     final session = lobbyState.sessionInfo;
     final members = lobbyState.members;
     final myUserId = authUser?.id ?? '';
-    final gameType = session?.gameType ?? widget.gameType ?? 'among_us';
+    final gameType = session?.gameType ?? widget.gameType ?? 'fantasy_wars_artifact';
     final isFantasyWars = _isFantasyWars(gameType);
 
     if (lobbyState.isGameStarted && !_didNavigateToGame) {
@@ -266,7 +268,7 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
           )
         : null;
     final minPlayers = isFantasyWars
-        ? (startStatus?.requiredTotalPlayers ?? 9)
+        ? (startStatus?.requiredTotalPlayers ?? 3)
         : GameUiPluginRegistry.minPlayersFor(gameType);
     final fantasyWarsLayoutReady = layoutStatus.isReady || _layoutSavedInThisVisit;
     final canStart = isFantasyWars
@@ -570,15 +572,15 @@ class _FantasyWarsStartStatus {
 
     final teamCount =
         (session?.gameConfig['teamCount'] as num?)?.toInt() ?? teams.length;
-    final requiredTotalPlayers = (teamCount * 3) > 9 ? teamCount * 3 : 9;
+    final requiredTotalPlayers = (teamCount * 1) > 3 ? teamCount * 1 : 3;
     final undersizedTeams = teams
-        .where((team) => (teamCounts[team.teamId] ?? 0) < 2)
+        .where((team) => (teamCounts[team.teamId] ?? 0) < 1)
         .toList(growable: false);
 
     return _FantasyWarsStartStatus(
       currentPlayers: members.length,
       requiredTotalPlayers: requiredTotalPlayers,
-      minimumPlayersPerTeam: 2,
+      minimumPlayersPerTeam: 1,
       unassignedCount: unassignedCount,
       teamCounts: teamCounts,
       undersizedTeams: undersizedTeams,

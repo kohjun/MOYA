@@ -16,10 +16,6 @@ const clampNumberFromSchema = (value, key) => {
   return Math.min(Math.max(Math.trunc(parsed), min), max);
 };
 
-const resolveBooleanFromDefault = (value, key) => (
-  typeof value === 'boolean' ? value : defaultConfig[key]
-);
-
 export function normalizeFantasyWarsDuelSettings(gameConfig = {}) {
   return {
     duelRangeMeters: clampNumberFromSchema(
@@ -30,10 +26,9 @@ export function normalizeFantasyWarsDuelSettings(gameConfig = {}) {
       gameConfig.bleEvidenceFreshnessMs,
       'bleEvidenceFreshnessMs',
     ),
-    allowGpsFallbackWithoutBle: resolveBooleanFromDefault(
-      gameConfig.allowGpsFallbackWithoutBle,
-      'allowGpsFallbackWithoutBle',
-    ),
+    allowGpsFallbackWithoutBle: typeof gameConfig.allowGpsFallbackWithoutBle === 'boolean'
+      ? gameConfig.allowGpsFallbackWithoutBle
+      : defaultConfig.allowGpsFallbackWithoutBle,
     locationFreshnessMs: clampNumberFromSchema(
       gameConfig.locationFreshnessMs,
       'locationFreshnessMs',

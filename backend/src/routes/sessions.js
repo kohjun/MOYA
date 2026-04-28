@@ -8,7 +8,6 @@ import { startGameForSession } from '../game/startGameService.js';
 import * as AIDirector from '../ai/AIDirector.js';
 import { redisClient } from '../config/redis.js';
 import { keys } from '../websocket/socketRuntime.js';
-import * as MissionSystem from '../game/MissionSystem.js';
 
 const createSessionSchema = z.object({
   name: z.string().max(100).optional(),
@@ -18,17 +17,6 @@ const createSessionSchema = z.object({
   gameType: z.string().optional(),
   gameConfig: z.record(z.unknown()).optional(),
   gameVersion: z.string().max(20).optional(),
-  impostorCount: z.number().min(1).max(3).optional(),
-  killCooldown: z.number().min(10).max(60).optional(),
-  discussionTime: z.number().min(30).max(180).optional(),
-  voteTime: z.number().min(15).max(60).optional(),
-  missionPerCrew: z.number().min(1).max(5).optional(),
-  settings: z.object({
-    killCooldown:      z.number().min(10).max(60).optional(),
-    emergencyCooldown: z.number().min(30).max(180).optional(),
-    voteTime:          z.number().min(15).max(60).optional(),
-    missionPerCrew:    z.number().min(1).max(5).optional(),
-  }).optional(),
 });
 
 const geoPointSchema = z.object({
@@ -55,18 +43,12 @@ const fantasyWarsDuelConfigSchema = z.object({
   { message: 'EMPTY_DUEL_CONFIG' },
 );
 
-// [Task 5] settings 중첩 객체를 최상위 필드로 병합 (기존 최상위 값이 우선)
 const normalizeCreateSessionBody = (body = {}) => {
-  const { settings, ...rest } = body;
   return {
-    ...rest,
-    activeModules:  rest.activeModules ?? rest.active_modules,
-    killCooldown:   rest.killCooldown   ?? settings?.killCooldown,
-    discussionTime: rest.discussionTime ?? settings?.emergencyCooldown,
-    voteTime:       rest.voteTime       ?? settings?.voteTime,
-    missionPerCrew: rest.missionPerCrew ?? settings?.missionPerCrew,
-    gameConfig:     rest.gameConfig     ?? {},
-    gameVersion:    rest.gameVersion    ?? '1.0',
+    ...body,
+    activeModules: body.activeModules ?? body.active_modules,
+    gameConfig:    body.gameConfig    ?? {},
+    gameVersion:   body.gameVersion   ?? '1.0',
   };
 };
 
@@ -92,7 +74,6 @@ export default async function sessionRoutes(fastify) {
       await Promise.all([
         redisClient.del(keys.state(sessionId)),
         redisClient.del(keys.started(sessionId)),
-        MissionSystem.clearSession(sessionId),
       ]);
     } catch (error) {
       fastify.log.warn({ error, sessionId }, '[Game] Failed to clean game state from Redis');
@@ -478,6 +459,60 @@ export default async function sessionRoutes(fastify) {
       }
       throw err;
     }
+  });
+
+  // ── LLM 재시도 (게임 시작 알림만 다시 생성) ─────────────────────────────────
+  fastify.post('/:sessionId/retry-llm', async (request, reply) => {
+    const { sessionId } = request.params;
+    const io = getIo();
+    if (!io) {
+      return reply.code(503).send({ error: 'SOCKET_SERVER_UNAVAILABLE' });
+    }
+
+    const started = await redisClient.get(keys.started(sessionId));
+    if (!started) {
+      return reply.code(409).send({ error: 'GAME_NOT_STARTED' });
+    }
+
+    // 즉시 202 응답 후 LLM 백그라운드 실행
+    reply.code(202).send({ queued: true });
+
+    setImmediate(async () => {
+      try {
+        const rawState = await redisClient.get(keys.state(sessionId));
+        const gameState = rawState ? JSON.parse(rawState) : {};
+        const members = await import('../services/sessionService.js')
+          .then(m => m.getSessionMembers(sessionId));
+        const aliveMembers = (members ?? []).filter(m => m?.user_id);
+
+        const ps = gameState.pluginState ?? {};
+        const roomLike = {
+          roomId: sessionId,
+          pluginState: ps,
+          alivePlayerIds: aliveMembers.map(m => m.user_id),
+        };
+
+        const msg = await AIDirector.fwOnGameStart(roomLike);
+        if (msg) {
+          io.to(`session:${sessionId}`).emit('game:ai_message', {
+            type: 'announcement',
+            message: msg,
+          });
+          io.to(`session:${sessionId}`).emit('ai:recovered', { sessionId });
+        } else {
+          io.to(`session:${sessionId}`).emit('ai:failed', {
+            sessionId,
+            message: 'AI 마스터가 응답하지 않았습니다. 잠시 후 다시 시도해주세요.',
+          });
+        }
+      } catch (err) {
+        console.error('[retry-llm] failed:', err.message);
+        io.to(`session:${sessionId}`).emit('ai:failed', {
+          sessionId,
+          message: 'AI 마스터 재시도 실패.',
+        });
+      }
+    });
   });
 
   fastify.patch('/:sessionId/sharing', async (request, reply) => {

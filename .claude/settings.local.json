@@ -35,7 +35,30 @@
       "Bash(git branch:*)",
       "Bash(git worktree:*)",
       "Bash(node --input-type=module)",
-      "Bash(grep -v \"//\")"
+      "Bash(grep -v \"//\")",
+      "Bash(rm -f \"C:/MOYA/backend/src/game/AmongUsLegacyPlugin.js\" \"C:/MOYA/backend/src/game/MissionSystem.js\" \"C:/MOYA/backend/src/game/VoteSystem.js\" \"C:/MOYA/backend/src/game/KillCooldownManager.js\" \"C:/MOYA/backend/src/websocket/handlers/roundVoteHandlers.js\" \"C:/MOYA/backend/src/websocket/handlers/meetingBusHandlers.js\")",
+      "Bash(rm -rf \"C:/MOYA/backend/src/ai/rag/knowledgeBase/among_us\")",
+      "Bash(grep -v \"packages\\\\\\\\\\\\\\\\\")",
+      "Bash(node --check src/game/plugins/fantasy_wars_artifact/index.js)",
+      "Bash(node --check src/websocket/socketRuntime.js)",
+      "Bash(node --check src/game/startGameService.js)",
+      "Bash(node --check src/game/GamePlugin.js)",
+      "Bash(node --check src/websocket/index.js)",
+      "Bash(npm test *)",
+      "Bash(node --check src/websocket/handlers/gameHandlers.js)",
+      "Bash(node --check src/game/plugins/fantasy_wars_artifact/service.js)",
+      "Bash(node -e \"import\\('./src/game/plugins/fantasy_wars_artifact/service.js'\\).then\\(\\(\\) => console.log\\('module loads OK'\\)\\).catch\\(e => console.error\\('LOAD FAIL:', e.message\\)\\)\")",
+      "Bash(SUPABASE_URL=https://example.com SUPABASE_SERVICE_ROLE_KEY=dummy node -e \"import\\('./src/game/plugins/fantasy_wars_artifact/service.js'\\).then\\(m => console.log\\('module loaded, exports:', Object.keys\\(m\\).slice\\(0,5\\)\\)\\).catch\\(e => console.error\\('FAIL:', e.message\\)\\)\")",
+      "Bash(SUPABASE_URL=https://example.com SUPABASE_ANON_KEY=dummy SUPABASE_SERVICE_ROLE_KEY=dummy SUPABASE_KEY=dummy node -e \"import\\('./src/game/plugins/fantasy_wars_artifact/service.js'\\).then\\(m => console.log\\('module loaded, exports:', Object.keys\\(m\\).slice\\(0,5\\)\\)\\).catch\\(e => console.error\\('FAIL:', e.message\\)\\)\")",
+      "Bash(SUPABASE_URL=https://example.com SUPABASE_SERVICE_KEY=dummy node -e \"import\\('./src/game/plugins/fantasy_wars_artifact/service.js'\\).then\\(m => console.log\\('OK, exports:', Object.keys\\(m\\)\\)\\).catch\\(e => console.error\\('FAIL:', e.message\\)\\)\")",
+      "Bash(node --check src/websocket/handlers/securityHandlers.js)",
+      "Bash(node --check src/game/plugins/fantasy_wars_artifact/schema.js)",
+      "Bash(node --check src/game/plugins/fantasy_wars_artifact/mutex.js)",
+      "Bash(node --test --test-isolation=none test/fantasy_wars/service.test.js test/fantasy_wars/capture.test.js)",
+      "Bash(node --test --test-isolation=none test/fantasy_wars/captureState.test.js test/fantasy_wars/duelResolution.test.js test/fantasy_wars/skills.test.js test/fantasy_wars/revive.test.js)",
+      "Bash(node --test --test-isolation=none test/fantasy_wars/capture.test.js test/fantasy_wars/captureState.test.js test/fantasy_wars/duelResolution.test.js test/fantasy_wars/skills.test.js test/fantasy_wars/revive.test.js test/fantasy_wars/schema.test.js test/fantasy_wars/sessionConfig.test.js test/fantasy_wars/proximityEvidence.test.js test/fantasy_wars/duelMinigames.test.js test/fantasy_wars/startValidation.test.js)",
+      "Bash(python *)",
+      "Bash(pip install *)"
     ]
   }
 }

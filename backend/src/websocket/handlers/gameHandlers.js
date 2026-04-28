@@ -12,6 +12,7 @@ import {
 import * as AIDirector from '../../ai/AIDirector.js';
 import { getSessionSnapshot, haversineMeters } from '../../services/locationService.js';
 import { cancelCaptureForPlayer } from '../../game/plugins/fantasy_wars_artifact/captureState.js';
+import { runExclusive } from '../../game/plugins/fantasy_wars_artifact/mutex.js';
 
 async function loadPluginCtx(sessionId) {
   const gameState = await readGameState(sessionId);
@@ -19,7 +20,7 @@ async function loadPluginCtx(sessionId) {
     return null;
   }
 
-  const plugin = GamePluginRegistry.get(gameState.gameType ?? 'among_us');
+  const plugin = GamePluginRegistry.get(gameState.gameType ?? 'fantasy_wars_artifact');
   return { gameState, plugin };
 }
 
@@ -146,6 +147,14 @@ async function validateFantasyWarsDuelPair(sessionId, challengerId, targetId) {
   if (challenger.guildId === target.guildId) {
     return { ok: false, error: 'TARGET_NOT_ENEMY' };
   }
+  // 점령 진행 중에는 결투 신청·수락이 불가능하다.
+  // 점령을 먼저 취소(capture_cancel)한 뒤 결투를 시도해야 한다.
+  if (challenger.captureZone) {
+    return { ok: false, error: 'CHALLENGER_CAPTURING' };
+  }
+  if (target.captureZone) {
+    return { ok: false, error: 'TARGET_CAPTURING' };
+  }
 
   const config = ps._config ?? {};
   const duelConfig = resolveDuelConfig(config);
@@ -168,6 +177,22 @@ async function validateFantasyWarsDuelPair(sessionId, challengerId, targetId) {
     || (now - targetLocation.ts) > freshnessMs
   ) {
     return { ok: false, error: 'LOCATION_STALE' };
+  }
+
+  // GPS 정확도가 임계값보다 나쁜 위치는 결투 판정에 사용하지 않는다.
+  const accuracyMaxMeters = config.locationAccuracyMaxMeters
+    ?? resolveDuelConfig(config).locationAccuracyMaxMeters;
+  const accuracyOk = (loc) =>
+    loc?.accuracy == null
+      || (Number.isFinite(loc.accuracy) && loc.accuracy <= accuracyMaxMeters);
+  if (!accuracyOk(challengerLocation) || !accuracyOk(targetLocation)) {
+    return {
+      ok: false,
+      error: 'LOCATION_INACCURATE',
+      challengerAccuracy: challengerLocation?.accuracy ?? null,
+      targetAccuracy: targetLocation?.accuracy ?? null,
+      accuracyMaxMeters,
+    };
   }
 
   const distanceMeters = haversineMeters(
@@ -222,44 +247,29 @@ async function validateFantasyWarsDuelPair(sessionId, challengerId, targetId) {
 }
 
 async function setDuelLockState(io, sessionId, participantIds, enabled, duelExpiresAt = null) {
-  const gameState = await readGameState(sessionId);
-  if (!gameState) {
-    return null;
-  }
-
-  const plugin = GamePluginRegistry.get(gameState.gameType ?? 'fantasy_wars_artifact');
-  const ps = gameState.pluginState ?? {};
-  const cancelledControlPointIds = new Set();
-  participantIds.forEach((participantId) => {
-    const player = ps.playerStates?.[participantId];
-    if (!player) {
-      return;
+  // 세션 락 안에서 실행되어 다른 fw 액션과 race가 차단된다.
+  // 점령 중 플레이어는 결투 신청·수락 단계에서 차단되므로 여기서 점령 자동 취소 로직은 불필요.
+  return runExclusive(`fw:session:${sessionId}`, async () => {
+    const gameState = await readGameState(sessionId);
+    if (!gameState) {
+      return null;
     }
 
-    if (enabled && player.captureZone) {
-      const capture = cancelCaptureForPlayer(ps, participantId);
-      if (capture?.cancelledActiveCapture) {
-        cancelledControlPointIds.add(capture.controlPointId);
+    const plugin = GamePluginRegistry.get(gameState.gameType ?? 'fantasy_wars_artifact');
+    const ps = gameState.pluginState ?? {};
+    participantIds.forEach((participantId) => {
+      const player = ps.playerStates?.[participantId];
+      if (!player) {
+        return;
       }
-    }
-
-    player.inDuel = enabled;
-    player.duelExpiresAt = enabled ? duelExpiresAt : null;
-  });
-
-  await saveGameState(sessionId, gameState);
-  emitPluginStateUpdate(io, sessionId, gameState, plugin, participantIds);
-  if (enabled && cancelledControlPointIds.size > 0) {
-    const { cancelCaptureTimer } = await import('../../game/plugins/fantasy_wars_artifact/capture.js');
-    cancelledControlPointIds.forEach((controlPointId) => {
-      cancelCaptureTimer(`${sessionId}:${controlPointId}`);
-      io.to(`session:${sessionId}`).emit(EVENTS.FW_CAPTURE_CANCELLED, {
-        controlPointId,
-        reason: 'participant_entered_duel',
-      });
+      player.inDuel = enabled;
+      player.duelExpiresAt = enabled ? duelExpiresAt : null;
     });
-  }
-  return { gameState, plugin };
+
+    await saveGameState(sessionId, gameState);
+    emitPluginStateUpdate(io, sessionId, gameState, plugin, participantIds);
+    return { gameState, plugin };
+  });
 }
 
 export const registerGameHandlers = ({ io, socket, mediaServer, userId }) => {
@@ -316,49 +326,46 @@ export const registerGameHandlers = ({ io, socket, mediaServer, userId }) => {
         return;
       }
 
-      try {
-        const ctx = await loadPluginCtx(sessionId);
-        if (!ctx) {
-          if (requireGame) {
-            respond({ ok: false, error: 'GAME_NOT_STARTED' });
+      // 세션 단위 mutex로 모든 fw 액션을 직렬화한다.
+      // 락 안에서 fresh state를 읽고 핸들러에 ctx.gameState로 전달하므로
+      // 다른 핸들러(setDuelLockState, onDuelResolve 등)와의 race가 차단된다.
+      await runExclusive(`fw:session:${sessionId}`, async () => {
+        try {
+          const ctx = await loadPluginCtx(sessionId);
+          if (!ctx) {
+            if (requireGame) {
+              respond({ ok: false, error: 'GAME_NOT_STARTED' });
+            }
+            return;
           }
-          return;
-        }
 
-        const { gameState, plugin } = ctx;
-        const result = await plugin.handleEvent(eventName, payload ?? {}, {
-          io,
-          socket,
-          userId,
-          sessionId,
-          gameState,
-          saveState: (gs) => saveGameState(sessionId, gs),
-          readState: () => readGameState(sessionId),
-          mediaServer,
-        });
+          const { gameState, plugin } = ctx;
+          const result = await plugin.handleEvent(eventName, payload ?? {}, {
+            io,
+            socket,
+            userId,
+            sessionId,
+            gameState,
+            saveState: (gs) => saveGameState(sessionId, gs),
+            readState: () => readGameState(sessionId),
+            mediaServer,
+          });
 
-        if (result && typeof result === 'object' && result.error) {
-          respond({ ok: false, error: result.error });
-        } else if (result === false) {
-          respond({ ok: false, error: 'ACTION_REJECTED' });
-        } else if (result && typeof result === 'object') {
-          respond({ ok: true, ...result });
-        } else {
-          respond({ ok: true });
+          if (result && typeof result === 'object' && result.error) {
+            respond({ ok: false, error: result.error });
+          } else if (result === false) {
+            respond({ ok: false, error: 'ACTION_REJECTED' });
+          } else if (result && typeof result === 'object') {
+            respond({ ok: true, ...result });
+          } else {
+            respond({ ok: true });
+          }
+        } catch (err) {
+          console.error(`[WS] ${eventName} error:`, err);
+          respond({ ok: false, error: err.message });
         }
-      } catch (err) {
-        console.error(`[WS] ${eventName} error:`, err);
-        respond({ ok: false, error: err.message });
-      }
+      });
     };
-
-  socket.on(EVENTS.GAME_KILL, dispatch('kill'));
-  socket.on(EVENTS.GAME_EMERGENCY, dispatch('emergency'));
-  socket.on(EVENTS.GAME_REPORT, dispatch('report'));
-  socket.on(EVENTS.GAME_VOTE, dispatch('vote'));
-  socket.on(EVENTS.GAME_MISSION_DONE, dispatch('mission_complete'));
-  socket.on(EVENTS.GAME_TRIGGER_SABOTAGE, dispatch('trigger_sabotage'));
-  socket.on(EVENTS.GAME_FIX_SABOTAGE, dispatch('fix_sabotage'));
 
   socket.on(EVENTS.FW_CAPTURE_START, dispatch('capture_start'));
   socket.on(EVENTS.FW_CAPTURE_CANCEL, dispatch('capture_cancel'));
@@ -366,9 +373,6 @@ export const registerGameHandlers = ({ io, socket, mediaServer, userId }) => {
   socket.on(EVENTS.FW_ATTACK, dispatch('attack'));
   socket.on(EVENTS.FW_REVIVE, dispatch('revive'));
   socket.on(EVENTS.FW_DUNGEON_ENTER, dispatch('dungeon_enter'));
-
-  socket.on(EVENTS.CALL_MEETING, dispatch('emergency'));
-  socket.on(EVENTS.SUBMIT_VOTE, dispatch('vote'));
 
   const transport = new SocketTransportAdapter(io);
 
@@ -398,6 +402,8 @@ export const registerGameHandlers = ({ io, socket, mediaServer, userId }) => {
       return null;
     }
 
+    // 결투 결과 반영 구간을 세션 락으로 보호한다. 동시에 다른 fw 액션이 gameState를 만지지 못하도록 직렬화.
+    return runExclusive(`fw:session:${sid}`, async () => {
     const gs = await readGameState(sid);
     if (!gs) {
       return null;
@@ -411,6 +417,7 @@ export const registerGameHandlers = ({ io, socket, mediaServer, userId }) => {
       return null;
     }
 
+    // 안전장치: 점령 중에는 결투 진입이 차단되지만, 클라/네트워크 엣지케이스로 도달 가능성이 있어 유지.
     if (loser.captureZone) {
       const activeCaptureId = loser.captureZone;
       const capture = cancelCaptureForPlayer(ps, loserId);
@@ -502,6 +509,7 @@ export const registerGameHandlers = ({ io, socket, mediaServer, userId }) => {
     }
 
     return resolution;
+    });
   };
 
   socket.on(EVENTS.FW_DUEL_CHALLENGE, async (payload, cb) => {
@@ -533,6 +541,14 @@ export const registerGameHandlers = ({ io, socket, mediaServer, userId }) => {
       transport,
       onResolve: (args) => onDuelResolve({ ...args, sessionId }),
       onInvalidate: async (args) => {
+        // 결투가 무효화되면 양 플레이어의 inDuel 잠금을 풀어 점령/이동을 재개시킨다.
+        // (start_game/accept 시점의 setDuelLockState(true)와 짝)
+        await setDuelLockState(
+          io,
+          sessionId,
+          [args.challengerId, args.targetId].filter(Boolean),
+          false,
+        );
         const logState = await readGameState(sessionId);
         emitFantasyWarsDuelLog(
           io,

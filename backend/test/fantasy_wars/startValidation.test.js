@@ -31,8 +31,8 @@ test('validateFantasyWarsStart accepts a 3-3-3 lobby', () => {
     makeConfig(),
   );
 
-  assert.equal(result.requiredTotalPlayers, 9);
-  assert.equal(result.minimumPlayersPerTeam, 2);
+  assert.equal(result.requiredTotalPlayers, 3);
+  assert.equal(result.minimumPlayersPerTeam, 1);
   assert.deepEqual(result.teamCounts, {
     guild_alpha: 3,
     guild_beta: 3,
@@ -89,7 +89,7 @@ test('validateFantasyWarsStart rejects teams that cannot support capture play', 
     ),
     (error) => {
       assert.equal(error.message, 'FANTASY_WARS_TEAM_SIZE_TOO_SMALL');
-      assert.equal(error.details.minimumPlayersPerTeam, 2);
+      assert.equal(error.details.minimumPlayersPerTeam, 1);
       assert.deepEqual(error.details.undersizedTeams, [
         {
           teamId: 'guild_gamma',

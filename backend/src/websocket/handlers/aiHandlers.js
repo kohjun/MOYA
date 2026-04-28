@@ -1,7 +1,7 @@
 import { redisClient } from '../../config/redis.js';
 import * as AIDirector from '../../ai/AIDirector.js';
 import { EVENTS } from '../socketProtocol.js';
-import { normalizeGameState } from '../socketRuntime.js';
+import { readGameState } from '../socketRuntime.js';
 
 export const registerAiHandlers = ({ socket, userId }) => {
   socket.on(EVENTS.GAME_AI_ASK, async ({ sessionId: sid, question }, cb) => {
@@ -15,7 +15,6 @@ export const registerAiHandlers = ({ socket, userId }) => {
       return respond({ ok: false, error: '질문이 너무 깁니다. (최대 200자)' });
     }
 
-    // AI 쿨타임 쓰로틀링 — 도배/요금 방어 (5초)
     const aiLimitKey = `throttle:ai:${sessionId}:${userId}`;
     const canAsk = await redisClient.set(aiLimitKey, '1', { NX: true, EX: 5 });
     if (!canAsk) {
@@ -26,34 +25,26 @@ export const registerAiHandlers = ({ socket, userId }) => {
     }
 
     try {
-      const gameRaw = await redisClient.get(`game:${sessionId}`);
-      if (!gameRaw) return respond({ ok: false, error: '게임이 시작되지 않았습니다.' });
+      const gameState = await readGameState(sessionId);
+      if (!gameState) return respond({ ok: false, error: '게임이 시작되지 않았습니다.' });
 
-      const gameState  = normalizeGameState(JSON.parse(gameRaw));
-      const isImpostor = gameState.impostors.includes(userId);
+      const ps = gameState.pluginState ?? {};
+      const playerState = ps.playerStates?.[userId] ?? {};
 
       const roomLike = {
         roomId:         sessionId,
-        gameType:       'among_us',
+        gameType:       gameState.gameType,
         status:         gameState.status,
-        killLog:        gameState.killLog || [],
-        alivePlayerIds: gameState.alivePlayerIds || [],
-        players:        new Map(
-          (gameState.alivePlayerIds || []).map((id) => [id, {
-            userId: id,
-            isAlive: true,
-            team: gameState.impostors.includes(id) ? 'impostor' : 'crew',
-          }]),
-        ),
+        alivePlayerIds: gameState.alivePlayerIds ?? [],
+        pluginState:    ps,
       };
 
       const playerLike = {
         userId,
-        nickname:  socket.user.nickname,
-        team:      isImpostor ? 'impostor' : 'crew',
-        roleId:    isImpostor ? 'impostor' : 'crew',
-        isAlive:   gameState.alivePlayerIds.includes(userId),
-        tasks:     [],
+        nickname: socket.user.nickname,
+        team:     playerState.guildId ?? null,
+        roleId:   playerState.job ?? null,
+        isAlive:  playerState.isAlive ?? (gameState.alivePlayerIds ?? []).includes(userId),
       };
 
       respond({ ok: true });

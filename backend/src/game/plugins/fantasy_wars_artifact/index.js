@@ -78,6 +78,18 @@ const FantasyWarsArtifactPlugin = {
     return 'late';
   },
 
+  // 판타지 워즈 음성 정책:
+  //   - 게임 진행 중에는 같은 길드 멤버끼리만 음성 가능 (팀 채널)
+  //   - 로비/종료 상태에서는 전체 오픈
+  getVoicePolicy(gameState, { userId } = {}) {
+    if (gameState?.status !== 'in_progress') {
+      return { mode: 'open' };
+    }
+    const ps = gameState.pluginState ?? {};
+    const player = userId ? (ps.playerStates ?? {})[userId] : null;
+    return { mode: 'team', teamId: player?.guildId ?? null };
+  },
+
   getSystemPrompt(role, nickname) {
     return [
       'You are the live announcer for Fantasy Wars: Artifact.',
@@ -85,6 +97,12 @@ const FantasyWarsArtifactPlugin = {
       `Player role: ${role}`,
       'Keep announcements short, dramatic, and easy to understand during live play.',
     ].join('\n');
+  },
+
+  // 현재 FW 지식베이스는 role: 'all' 태그만 사용한다.
+  // 직업/길드 ID로 RAG를 필터링하면 결과가 비어 응답 품질이 떨어진다.
+  getKnowledgeRole() {
+    return 'all';
   },
 
   buildStateContext(gameState, player) {

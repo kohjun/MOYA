@@ -46,6 +46,7 @@ test('resolveDuelConfig keeps realtime duel defaults aligned', () => {
     bleEvidenceFreshnessMs: 12000,
     allowGpsFallbackWithoutBle: false,
     locationFreshnessMs: 45000,
+    locationAccuracyMaxMeters: 50,
   });
 
   assert.deepEqual(resolveDuelConfig({
@@ -53,10 +54,12 @@ test('resolveDuelConfig keeps realtime duel defaults aligned', () => {
     bleEvidenceFreshnessMs: 8000,
     allowGpsFallbackWithoutBle: true,
     locationFreshnessMs: 12000,
+    locationAccuracyMaxMeters: 30,
   }), {
     duelRangeMeters: 14,
     bleEvidenceFreshnessMs: 8000,
     allowGpsFallbackWithoutBle: true,
     locationFreshnessMs: 12000,
+    locationAccuracyMaxMeters: 30,
   });
 });

@@ -13,6 +13,7 @@ export const configSchema = {
   bleEvidenceFreshnessMs: { type: 'number', default: 12000, min: 2000, max: 60000 },
   allowGpsFallbackWithoutBle: { type: 'boolean', default: false },
   locationFreshnessMs: { type: 'number', default: 45000, min: 5000, max: 300000 },
+  locationAccuracyMaxMeters: { type: 'number', default: 50, min: 5, max: 500 },
   reviveBaseChance: { type: 'number', default: 0.3, min: 0.1, max: 1.0 },
   reviveStepChance: { type: 'number', default: 0.1, min: 0.0, max: 0.5 },
   reviveMaxChance: { type: 'number', default: 0.8, min: 0.3, max: 1.0 },
@@ -41,6 +42,7 @@ export const defaultConfig = {
   bleEvidenceFreshnessMs: 12000,
   allowGpsFallbackWithoutBle: false,
   locationFreshnessMs: 45000,
+  locationAccuracyMaxMeters: 50,
   reviveBaseChance: 0.3,
   reviveStepChance: 0.1,
   reviveMaxChance: 0.8,
@@ -64,6 +66,8 @@ export function resolveDuelConfig(config = {}) {
       config.allowGpsFallbackWithoutBle ?? defaultConfig.allowGpsFallbackWithoutBle,
     locationFreshnessMs:
       config.locationFreshnessMs ?? defaultConfig.locationFreshnessMs,
+    locationAccuracyMaxMeters:
+      config.locationAccuracyMaxMeters ?? defaultConfig.locationAccuracyMaxMeters,
   };
 }
 

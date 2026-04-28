@@ -18,8 +18,24 @@ const FANTASY_WARS_TEAM_DEFINITIONS = [
 const isFantasyWarsSession = (gameType) =>
   gameType === FANTASY_WARS_GAME_TYPE || gameType === LEGACY_FANTASY_WARS_GAME_TYPE;
 
+// 개발/에뮬레이터 환경에서는 BLE를 사용할 수 없으므로 새 세션 생성 시 GPS 폴백을 기본 허용한다.
+// 프로덕션에서는 호스트가 명시적으로 켜야 한다. 호스트가 명시적으로 false를 보냈으면 그 값을 존중한다.
+const isDevelopmentEnv = () =>
+  process.env.FW_DEV_GPS_FALLBACK === 'true' ||
+  process.env.NODE_ENV === 'development';
+
+const applyDevDefaults = (gameConfig = {}) => {
+  if (!isDevelopmentEnv()) {
+    return gameConfig;
+  }
+  if (typeof gameConfig.allowGpsFallbackWithoutBle === 'boolean') {
+    return gameConfig;
+  }
+  return { ...gameConfig, allowGpsFallbackWithoutBle: true };
+};
+
 const normalizeGameType = (gameType) =>
-  isFantasyWarsSession(gameType) ? FANTASY_WARS_GAME_TYPE : (gameType ?? 'among_us');
+  isFantasyWarsSession(gameType) ? FANTASY_WARS_GAME_TYPE : (gameType ?? FANTASY_WARS_GAME_TYPE);
 
 const clampTeamCount = (value) => {
   const parsed = Number(value);
@@ -210,31 +226,17 @@ export const createSession = async (hostUserId, {
   gameType,
   gameConfig,
   gameVersion,
-  impostorCount,
-  killCooldown,
-  discussionTime,
-  voteTime,
-  missionPerCrew,
 } = {}) => {
   const code = await generateSessionCode();
   const expiresAt = new Date(Date.now() + ((durationHours ?? 24) * 60 * 60 * 1000));
 
   const rows = await withTransaction(async (client) => {
     // [Task 5] 寃뚯엫 ?ㅼ젙??module_configs JSONB ?먮룄 ???(?대씪?댁뼵???대갚??
-    const resolvedKillCooldown   = killCooldown   ?? 30;
-    const resolvedDiscussionTime = discussionTime ?? 90;
-    const resolvedVoteTime       = voteTime       ?? 30;
-    const resolvedMissionPerCrew = missionPerCrew ?? 3;
-    const moduleConfigsJson = JSON.stringify({
-      killCooldown:      resolvedKillCooldown,
-      emergencyCooldown: resolvedDiscussionTime,
-      voteTime:          resolvedVoteTime,
-      missionPerCrew:    resolvedMissionPerCrew,
-    });
+    const moduleConfigsJson = JSON.stringify({});
 
     const resolvedGameType    = normalizeGameType(gameType);
     const resolvedGameConfig  = isFantasyWarsSession(resolvedGameType)
-      ? buildFantasyWarsGameConfig(gameConfig ?? {})
+      ? buildFantasyWarsGameConfig(applyDevDefaults(gameConfig ?? {}))
       : (gameConfig ?? {});
     const resolvedGameVersion = gameVersion ?? '1.0';
     const initialTeamId = isFantasyWarsSession(resolvedGameType)
@@ -246,27 +248,19 @@ export const createSession = async (hostUserId, {
       `INSERT INTO sessions
          (host_user_id, session_code, name, expires_at, active_modules,
           game_type, game_config, game_version,
-          max_members, impostor_count, kill_cooldown, discussion_time, vote_time, mission_per_crew,
-          module_configs)
+          max_members, module_configs)
        VALUES ($1, $2, $3, $4, $5,
                $6, $7::jsonb, $8,
-               COALESCE($9, 50), COALESCE($10, 1), $11,
-               $12, $13, $14, $15::jsonb)
+               COALESCE($9, 50), $10::jsonb)
        RETURNING id, host_user_id, session_code, name, status, created_at, expires_at,
                  active_modules, module_configs, max_members,
-                 game_type, game_config, game_version,
-                 impostor_count, kill_cooldown, discussion_time, vote_time, mission_per_crew`,
+                 game_type, game_config, game_version`,
       [
         hostUserId, code, name || null, expiresAt, activeModules,
         resolvedGameType,
         JSON.stringify(resolvedGameConfig),
         resolvedGameVersion,
-        maxMembers            ?? null,
-        impostorCount         ?? null,
-        resolvedKillCooldown,
-        resolvedDiscussionTime,
-        resolvedVoteTime,
-        resolvedMissionPerCrew,
+        maxMembers ?? null,
         moduleConfigsJson,
       ]
     );
@@ -404,7 +398,10 @@ export const getSessionMembers = async (sessionId) => {
   const membersWithLocation = await Promise.all(
     rows.map(async (member) => {
       const location = await getCache(`location:${sessionId}:${member.user_id}`);
-      return { ...member, lastLocation: location };
+      return {
+        ...member,
+        lastLocation: location?.visibility === 'public' ? location : null,
+      };
     })
   );
 
@@ -497,7 +494,6 @@ export const getSession = async (sessionId) => {
     `SELECT id, host_user_id, session_code, name, status,
             created_at, expires_at, ended_at, active_modules, module_configs, max_members,
             game_type, game_config, game_version,
-            impostor_count, kill_cooldown, discussion_time, vote_time, mission_per_crew,
             playable_area
      FROM sessions
      WHERE id = $1`,

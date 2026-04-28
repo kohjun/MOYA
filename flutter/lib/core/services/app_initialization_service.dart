@@ -5,7 +5,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_naver_map/flutter_naver_map.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'background_service.dart';
 import '../../firebase_options.dart';
 
 class AppInitializationService {
@@ -79,12 +78,6 @@ class AppInitializationService {
 
     _naverMapInitFuture = future;
     return future;
-  }
-
-  Future<void> resetBackgroundFlags() async {
-    await _runTimed('Reset background flags', () async {
-      await shutdownBackgroundService();
-    });
   }
 
   Future<void> _runTimed(
