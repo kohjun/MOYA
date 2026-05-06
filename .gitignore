@@ -1,0 +1,15 @@
+# Dart analyzer cache
+.localappdata/
+
+# Flutter / Dart tool telemetry (per-user, auto-generated)
+.appdata/.dart-tool/
+
+# Claude Code runtime artifacts (per-user)
+.claude/scheduled_tasks.lock
+.claude/settings.json
+
+# Environment / secrets
+.env
+.env.local
+*.pem
+*.key
