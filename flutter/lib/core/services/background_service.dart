@@ -13,7 +13,6 @@ import 'package:geolocator/geolocator.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
 
 // 방금 만든 알림 서비스 임포트
-import 'notification_service.dart';
 
 const notificationChannelId = 'location_tracking_channel';
 const notificationId = 888;
@@ -23,6 +22,7 @@ const _backgroundPreferenceKeys = <String>[
   'bg_refresh_token',
   'bg_session_id',
   'bg_server_url',
+  'bg_foreground_active',
   'bg_wakeup_requested',
 ];
 
@@ -78,16 +78,32 @@ Future<void> initializeBackgroundService() async {
 Future<void> shutdownBackgroundService() async {
   try {
     final service = FlutterBackgroundService();
+    bool wasRunning = false;
     try {
-      final running = await service.isRunning();
-      if (running) {
-        service.invoke('stopService');
-        // stopService 도달 시점은 service isolate에 따라 약간 지연된다.
-        // 다음 단계(configure 또는 main 부팅)에서 race가 나지 않도록 짧게 대기.
-        await Future<void>.delayed(const Duration(milliseconds: 200));
-      }
+      wasRunning = await service.isRunning();
     } catch (e) {
-      debugPrint('[Background] isRunning/invoke 중 예외 (무시): $e');
+      debugPrint('[Background] isRunning 조회 실패: $e');
+    }
+
+    if (wasRunning) {
+      try {
+        service.invoke('stopService');
+      } catch (e) {
+        debugPrint('[Background] stopService invoke 실패: $e');
+      }
+
+      // stopService 가 background isolate 에 도달할 시간을 준다.
+      // 짧은 지연(200ms)으로는 sticky foreground service 가 살아있어
+      // "Service already running" 로그가 다음 부팅에 또 뜬다.
+      // 최대 ~1초까지 100ms 단위로 isRunning 폴링.
+      for (var i = 0; i < 10; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        try {
+          if (!await service.isRunning()) break;
+        } catch (_) {
+          break;
+        }
+      }
     }
 
     final prefs = await SharedPreferences.getInstance();
@@ -111,13 +127,22 @@ Future<bool> onIosBackground(ServiceInstance service) async {
 // 백그라운드 서비스가 시작될 때 실행되는 메인 진입점
 @pragma('vm:entry-point')
 void onStart(ServiceInstance service) async {
-  // DartPluginRegistrant는 flutter_background_service_android 자체가
-  // 백그라운드 isolate에서 등록되려 할 때 "main isolate only" 예외를 던진다.
-  // try/catch로 해당 에러를 무시하고 계속 진행한다.
+  // DartPluginRegistrant.ensureInitialized() 는 background isolate 에서 사용되는
+  // 플러그인(geolocator, shared_preferences, battery_plus 등)을 일괄 등록한다.
+  // 이 과정에서 flutter_background_service_android 자체가 "main isolate only"
+  // 예외를 던지는데(자기 자신은 background isolate 에 등록되면 안 되기 때문),
+  // 이는 정상 동작이며 다른 플러그인 등록은 정상적으로 완료된다. 무시하고 진행.
   try {
     DartPluginRegistrant.ensureInitialized();
-  } catch (_) {}
-  await NotificationService().init();
+  } catch (error) {
+    debugPrint(
+        '[Background] plugin registrant warning (safe to ignore): $error');
+  }
+  // background isolate 전용 init — 콜백 등록 / 채널 생성 없이 show() 만 가능.
+  // 채널은 main isolate 의 initForMainIsolate() 가 미리 만들어 둔다.
+  // Keep background isolate free of UI/local-notification plugin init.
+  // Main isolate creates channels and owns notification tap callbacks.
+  await _BackgroundGeofenceNotifier().init();
 
   final prefs = await SharedPreferences.getInstance();
   final token = prefs.getString('bg_token');
@@ -133,7 +158,9 @@ void onStart(ServiceInstance service) async {
   io.Socket? socket;
   StreamSubscription<Position>? positionSub;
   Timer? idleTimer;
+  Timer? wakeupPollTimer;
   bool isIdle = false;
+  bool foregroundActive = prefs.getBool('bg_foreground_active') ?? false;
   Position? prevPos;
   final Set<String> insideGeofences = {};
   final battery = Battery();
@@ -232,20 +259,27 @@ void onStart(ServiceInstance service) async {
     positionSub?.cancel();
     isIdle = idle;
 
-    // ★ 에러 해결: const 제거 (AndroidSettings는 const 생성자를 지원하지 않음)
+    if (foregroundActive) {
+      positionSub?.cancel();
+      positionSub = null;
+      socket?.disconnect();
+      debugPrint('[Background] foreground active: location stream paused');
+      return;
+    }
+
     final settings = idle
         ? AndroidSettings(
-            accuracy: LocationAccuracy.medium,
-            distanceFilter: 50, // 50m 이동 시 갱신
-            intervalDuration: const Duration(seconds: 30),
+            accuracy: LocationAccuracy.low,
+            distanceFilter: 75,
+            intervalDuration: const Duration(seconds: 60),
           )
         : AndroidSettings(
-            accuracy: LocationAccuracy.high,
-            distanceFilter: 5, // 5m 이동 시 갱신
-            intervalDuration: const Duration(seconds: 5),
+            accuracy: LocationAccuracy.medium,
+            distanceFilter: 15,
+            intervalDuration: const Duration(seconds: 10),
             foregroundNotificationConfig: const ForegroundNotificationConfig(
               notificationTitle: "실시간 위치 공유 중",
-              notificationText: "정밀 위치 추적 모드 활성화",
+              notificationText: "백그라운드 위치 추적 모드 활성화",
             ),
           );
 
@@ -267,9 +301,10 @@ void onStart(ServiceInstance service) async {
       try {
         await prefs.reload();
       } catch (_) {}
-      final bgActive = prefs.getBool('bg_active') ?? false;
-      if (bgActive) {
+      foregroundActive = prefs.getBool('bg_foreground_active') ?? false;
+      if (foregroundActive) {
         prevPos = pos;
+        socket?.disconnect();
         return;
       }
 
@@ -323,19 +358,43 @@ void onStart(ServiceInstance service) async {
   // 외부(FCM)로부터 기상 명령 수신 — service.invoke() 경로 (메인 Isolate용)
   service.on('wakeUp').listen((event) {
     debugPrint('[Background] 기상 명령 수신 (invoke 경로)! 소켓 재연결');
+    foregroundActive = false;
+    connectSocket();
+    startTracking(idle: false);
+  });
+
+  service.on('setForegroundActive').listen((event) async {
+    final active = event?['active'] == true;
+    foregroundActive = active;
+    try {
+      await prefs.setBool('bg_foreground_active', active);
+    } catch (_) {}
+
+    if (active) {
+      positionSub?.cancel();
+      positionSub = null;
+      idleTimer?.cancel();
+      socket?.disconnect();
+      debugPrint('[Background] foreground handoff: paused background work');
+      return;
+    }
+
+    debugPrint('[Background] background handoff: resumed tracking');
     connectSocket();
     startTracking(idle: false);
   });
 
   // SharedPreferences 플래그 폴링 — FCM 백그라운드 핸들러에서 오는 기상 명령용
   // (FCM 핸들러는 별도 Isolate에서 실행되므로 invoke() 대신 플래그를 사용합니다)
-  Timer.periodic(const Duration(seconds: 30), (_) async {
+  wakeupPollTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
     try {
       await prefs.reload(); // 외부 변경 사항 반영
       final wakeupRequested = prefs.getBool('bg_wakeup_requested') ?? false;
       if (wakeupRequested) {
         await prefs.setBool('bg_wakeup_requested', false); // 플래그 즉시 초기화
         debugPrint('[Background] FCM wakeUp 플래그 감지! 소켓 재연결 및 추적 재개');
+        foregroundActive = false;
+        await prefs.setBool('bg_foreground_active', false);
         connectSocket();
         startTracking(idle: false);
       }
@@ -348,14 +407,19 @@ void onStart(ServiceInstance service) async {
   service.on('stopService').listen((event) {
     positionSub?.cancel();
     idleTimer?.cancel();
+    wakeupPollTimer?.cancel();
     socket?.dispose();
     service.stopSelf();
     debugPrint('[Background] 서비스 및 소켓 정상 종료');
   });
 
   // 초기 실행
-  connectSocket();
-  startTracking(idle: false);
+  if (!foregroundActive) {
+    connectSocket();
+    startTracking(idle: false);
+  } else {
+    debugPrint('[Background] started while foreground active; staying paused');
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -387,16 +451,81 @@ void _checkGeofencesInBg(Position pos, String sessionId,
 
         if (isCurrentlyInside && !wasInside) {
           insideGeofences.add(gfId);
-          NotificationService()
-              .showNotification('지오펜스 진입', '$gfName 영역에 들어왔습니다!');
+          unawaited(_BackgroundGeofenceNotifier()
+              .showNotification('지오펜스 진입', '$gfName 영역에 들어왔습니다!'));
         } else if (!isCurrentlyInside && wasInside) {
           insideGeofences.remove(gfId);
-          NotificationService()
-              .showNotification('지오펜스 이탈', '$gfName 영역을 벗어났습니다.');
+          unawaited(_BackgroundGeofenceNotifier()
+              .showNotification('지오펜스 이탈', '$gfName 영역을 벗어났습니다.'));
         }
       }
     } catch (e) {
       debugPrint('[Background] 지오펜스 파싱 에러: $e');
+    }
+  }
+}
+
+// background isolate 에서 지오펜스 진입/이탈 시스템 알림을 띄우는 헬퍼.
+// NotificationService 는 _isMainIsolate 가드 때문에 background 에서 동작하지
+// 않으므로(설계상 main isolate 의 채널 생성/탭 콜백과 분리), 여기서는 채널은
+// main isolate (initializeBackgroundService / NotificationService.initForMainIsolate)
+// 가 만들어 둔 'geofence_channel' 을 그대로 재사용하고 show() 만 호출한다.
+// 탭 콜백은 등록하지 않아 Navigator/Riverpod 등 main-only API 와 충돌하지 않는다.
+class _BackgroundGeofenceNotifier {
+  _BackgroundGeofenceNotifier._internal();
+  static final _BackgroundGeofenceNotifier _instance =
+      _BackgroundGeofenceNotifier._internal();
+  factory _BackgroundGeofenceNotifier() => _instance;
+
+  final FlutterLocalNotificationsPlugin _plugin =
+      FlutterLocalNotificationsPlugin();
+  bool _initialized = false;
+
+  Future<void> init() async {
+    if (_initialized) return;
+    try {
+      await _plugin.initialize(
+        settings: const InitializationSettings(
+          android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+          iOS: DarwinInitializationSettings(),
+        ),
+      );
+      _initialized = true;
+    } catch (e) {
+      debugPrint('[Background] geofence notifier init failed: $e');
+    }
+  }
+
+  Future<void> showNotification(String title, String body) async {
+    if (!_initialized) {
+      await init();
+    }
+    if (!_initialized) {
+      debugPrint(
+        '[Background] notifier not initialized, dropping notification: $title',
+      );
+      return;
+    }
+    final id = DateTime.now().microsecondsSinceEpoch.remainder(0x7fffffff);
+    const details = NotificationDetails(
+      android: AndroidNotificationDetails(
+        'geofence_channel',
+        '지오펜스 알림',
+        channelDescription: '게임 지오펜스 진입/이탈 알림',
+        importance: Importance.max,
+        priority: Priority.high,
+      ),
+      iOS: DarwinNotificationDetails(),
+    );
+    try {
+      await _plugin.show(
+        id: id,
+        title: title,
+        body: body,
+        notificationDetails: details,
+      );
+    } catch (e) {
+      debugPrint('[Background] geofence show failed: $e');
     }
   }
 }
