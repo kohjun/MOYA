@@ -60,6 +60,7 @@ test('captureValidator rejects invalid capture attempts', () => {
     }),
     { ok: false, error: 'NOT_IN_CAPTURE_ZONE' },
   );
+  // 적이 zone 안에 있어도 점령 시작은 허용한다 (방해는 capture_disrupt 전용).
   assert.deepEqual(
     captureValidator(cp, makePlayer(), {
       hasFreshLocation: true,
@@ -67,14 +68,25 @@ test('captureValidator rejects invalid capture attempts', () => {
       enemyInZoneCount: 1,
       friendlyInZoneCount: 2,
     }),
-    { ok: false, error: 'ENEMY_IN_ZONE' },
+    { ok: true },
   );
+  // friendlyInZoneCount: 1 은 SOLO 점령 허용 정책상 ok 가 되어야 한다.
   assert.deepEqual(
     captureValidator(cp, makePlayer(), {
       hasFreshLocation: true,
       requesterInZone: true,
       enemyInZoneCount: 0,
       friendlyInZoneCount: 1,
+    }),
+    { ok: true },
+  );
+  // 0 명일 때만 NOT_ENOUGH_TEAMMATES_IN_ZONE.
+  assert.deepEqual(
+    captureValidator(cp, makePlayer(), {
+      hasFreshLocation: true,
+      requesterInZone: true,
+      enemyInZoneCount: 0,
+      friendlyInZoneCount: 0,
     }),
     { ok: false, error: 'NOT_ENOUGH_TEAMMATES_IN_ZONE' },
   );
@@ -87,19 +99,27 @@ test('captureHoldValidator enforces active hold requirements', () => {
   });
 
   const cp = makeControlPoint({ capturingGuild: 'guild_alpha' });
+  // 적이 zone 안에 들어와도 hold 는 자동 취소되지 않는다 (disrupt 가 별도 경로).
   assert.deepEqual(
     captureHoldValidator(cp, {
       enemyInZoneCount: 1,
       friendlyInZoneCount: 2,
     }),
-    { ok: false, error: 'ENEMY_IN_ZONE' },
+    { ok: true },
+  );
+  assert.deepEqual(
+    captureHoldValidator(cp, {
+      enemyInZoneCount: 0,
+      friendlyInZoneCount: 0,
+    }),
+    { ok: false, error: 'NOT_ENOUGH_TEAMMATES_IN_ZONE' },
   );
   assert.deepEqual(
     captureHoldValidator(cp, {
       enemyInZoneCount: 0,
       friendlyInZoneCount: 1,
     }),
-    { ok: false, error: 'NOT_ENOUGH_TEAMMATES_IN_ZONE' },
+    { ok: true },
   );
   assert.deepEqual(
     captureHoldValidator(cp, {
@@ -130,5 +150,8 @@ test('capture intent helpers keep only valid and ready intents', () => {
   });
   assert.equal(isCaptureReady(intents, ['user-1', 'user-2']), true);
   assert.equal(isCaptureReady(intents, ['user-1', 'user-3']), false);
-  assert.equal(isCaptureReady(intents, ['user-1']), false);
+  // 1인 점령 허용 정책: 단일 사용자 intent 도 ready 로 인정.
+  assert.equal(isCaptureReady(intents, ['user-1']), true);
+  // 빈 배열은 ready 가 아님.
+  assert.equal(isCaptureReady(intents, []), false);
 });

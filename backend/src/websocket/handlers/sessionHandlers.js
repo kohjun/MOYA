@@ -5,6 +5,10 @@ import { sendSosAlert, sendGeofenceAlert } from '../../services/fcmService.js';
 import { checkGeofences } from '../../services/geofenceService.js';
 import { EVENTS } from '../socketProtocol.js';
 import { ensureMediaRoomForSocket, readGameState } from '../socketRuntime.js';
+import {
+  isValidJob,
+  setJobPreference,
+} from '../../game/sessionJobSelections.js';
 
 const stripMemberPrivateLocation = (member) => ({
   ...member,
@@ -224,6 +228,36 @@ export const registerSessionHandlers = ({ io, socket, mediaServer, userId, leave
       sessionId, triggeredByUserId: userId, nickname: socket.user.nickname,
       location: lat && lng ? { lat, lng } : null, sosMessage: message || '긴급 상황 발생!',
     }).catch((err) => console.error('[WS] FCM SOS error:', err));
+  });
+
+  socket.on(EVENTS.FW_SELECT_JOB, async (payload = {}, ack) => {
+    const respond = (response) => {
+      if (typeof ack === 'function') ack(response);
+    };
+
+    const sessionId = payload.sessionId || socket.currentSessionId;
+    const job = payload.job;
+
+    if (!sessionId) {
+      return respond({ ok: false, error: 'MISSING_SESSION_ID' });
+    }
+    if (!isValidJob(job)) {
+      return respond({ ok: false, error: 'INVALID_JOB' });
+    }
+
+    try {
+      const members = await sessionService.getSessionMembers(sessionId);
+      const isMember = members.some((m) => m.user_id === userId);
+      if (!isMember) {
+        return respond({ ok: false, error: 'NOT_A_MEMBER' });
+      }
+
+      setJobPreference(sessionId, userId, job);
+      return respond({ ok: true, job });
+    } catch (err) {
+      console.error('[WS] fw:select_job error:', err);
+      return respond({ ok: false, error: 'SELECT_JOB_FAILED' });
+    }
   });
 
   socket.on(EVENTS.VOICE_SPEAKING, ({ sessionId: sid, isSpeaking }) => {

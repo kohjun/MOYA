@@ -26,6 +26,10 @@ function makeGuilds() {
   };
 }
 
+// hold delay 가 켜진(legacy) config 를 명시 — 기본값은 [W4] 로 0 으로 바뀌어
+// 즉시 종료라 이 케이스를 더 이상 default 로 검증할 수 없다.
+const holdEnabledConfig = { ...defaultConfig, controlPointHoldDurationSec: 20 };
+
 test('checkWinCondition waits for the control point hold duration before territory win', () => {
   const gameState = makeGameState({
     pluginState: {
@@ -46,7 +50,7 @@ test('checkWinCondition waits for the control point hold duration before territo
     },
   });
 
-  assert.equal(checkWinCondition(gameState, defaultConfig), null);
+  assert.equal(checkWinCondition(gameState, holdEnabledConfig), null);
 });
 
 test('checkWinCondition grants territory win after the hold timer expires', () => {
@@ -70,7 +74,7 @@ test('checkWinCondition grants territory win after the hold timer expires', () =
     },
   });
 
-  const verdict = checkWinCondition(gameState, defaultConfig);
+  const verdict = checkWinCondition(gameState, holdEnabledConfig);
   assert.equal(verdict?.winner, 'guild_alpha');
   assert.equal(verdict?.reason, 'control_point_majority');
 });
@@ -120,4 +124,32 @@ test('getPublicState exposes duel BLE rules to clients', () => {
   assert.equal(publicState.duelRangeMeters, 18);
   assert.equal(publicState.bleEvidenceFreshnessMs, 9000);
   assert.equal(publicState.allowGpsFallbackWithoutBle, false);
+});
+
+// reconnect/late-join 클라가 점령 진행 중인 CP 의 정확한 진행 시간을 복원하려면
+// public state 의 controlPoint 페이로드에 captureDurationSec 가 포함되어야 한다.
+test('getPublicState includes captureDurationSec on control points', () => {
+  const cp = makeControlPoint({
+    id: 'cp-1',
+    capturingGuild: 'guild_alpha',
+    captureStartedAt: Date.now() - 5_000,
+  });
+  const gameState = makeGameState({
+    pluginState: {
+      guilds: makeGuilds(),
+      controlPoints: [cp],
+      dungeons: [],
+      playableArea: [],
+      spawnZones: [],
+      _config: {
+        ...defaultConfig,
+        captureDurationSec: 60,
+      },
+    },
+    alivePlayerIds: ['alpha-master'],
+  });
+
+  const publicState = getPublicState(gameState);
+  assert.equal(publicState.controlPoints.length, 1);
+  assert.equal(publicState.controlPoints[0].captureDurationSec, 60);
 });

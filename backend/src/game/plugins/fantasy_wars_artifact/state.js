@@ -54,12 +54,18 @@ export function buildGuilds(members, teamDefinitions) {
   return { guilds, playerGuildMap };
 }
 
-export function assignJobs(guilds) {
+export function assignJobs(guilds, preferences = new Map()) {
   const playerJobMap = new Map();
+  const jobPool = Array.from(new Set(JOB_PRIORITY));
 
   Object.values(guilds).forEach((guild) => {
-    guild.memberIds.forEach((userId, index) => {
-      const job = JOB_PRIORITY[index % JOB_PRIORITY.length] ?? 'warrior';
+    guild.memberIds.forEach((userId) => {
+      const preferred = preferences.get(userId);
+      if (preferred && jobPool.includes(preferred)) {
+        playerJobMap.set(userId, preferred);
+        return;
+      }
+      const job = jobPool[Math.floor(Math.random() * jobPool.length)] ?? 'warrior';
       playerJobMap.set(userId, job);
     });
   });
@@ -100,7 +106,7 @@ export function buildDungeons() {
   ];
 }
 
-export function buildInitialPluginState(members, config, session = null) {
+export function buildInitialPluginState(members, config, session = null, jobPreferences = new Map()) {
   const configuredTeams = resolveTeamDefinitions(config);
   const teamCount = configuredTeams.length;
   const controlPointCount = config.controlPointCount ?? 5;
@@ -109,7 +115,7 @@ export function buildInitialPluginState(members, config, session = null) {
   const spawnZones = normalizeSpawnZones(config?.spawnZones, configuredTeams);
 
   const { guilds, playerGuildMap } = buildGuilds(members, configuredTeams);
-  const playerJobMap = assignJobs(guilds);
+  const playerJobMap = assignJobs(guilds, jobPreferences);
   const controlPoints = buildControlPoints(controlPointCount, controlPointLocations);
   const dungeons = buildDungeons();
 
@@ -149,6 +155,10 @@ export function buildInitialPluginState(members, config, session = null) {
       trackedTargetUserId: null,
       executionArmedUntil: null,
       dungeonEnteredAt: null,
+      // 부활 쿨타임 만료 시각(ms). null = 입장 전 / 즉시 시도 가능 상태.
+      nextReviveAt: null,
+      // 쿨타임 종료 후 수동 부활 시도가 가능한 상태인지.
+      reviveReady: false,
       spawnZoneTeamId: guildId,
     };
   });

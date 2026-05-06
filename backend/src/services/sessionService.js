@@ -222,13 +222,21 @@ export const createSession = async (hostUserId, {
   name,
   activeModules   = [],
   durationHours,
+  durationMinutes,
   maxMembers,
   gameType,
   gameConfig,
   gameVersion,
 } = {}) => {
   const code = await generateSessionCode();
-  const expiresAt = new Date(Date.now() + ((durationHours ?? 24) * 60 * 60 * 1000));
+  // 세션 길이는 분 단위가 우선. 옛 클라이언트 호환을 위해 durationHours 도 그대로
+  // 받는다. 둘 다 없으면 기본 90 분(1.5 시간).
+  const totalMinutes = Number.isFinite(durationMinutes)
+    ? Math.max(1, Math.trunc(durationMinutes))
+    : Number.isFinite(durationHours)
+      ? Math.max(1, Math.trunc(durationHours * 60))
+      : 90;
+  const expiresAt = new Date(Date.now() + totalMinutes * 60 * 1000);
 
   const rows = await withTransaction(async (client) => {
     // [Task 5] 寃뚯엫 ?ㅼ젙??module_configs JSONB ?먮룄 ???(?대씪?댁뼵???대갚??

@@ -41,20 +41,32 @@ export const EVENTS = {
   VOICE_SPEAKING: 'voice:speaking',
   ERROR: 'error',
 
+  // Fantasy Wars — 직업 선택 — Client -> Server
+  FW_SELECT_JOB:     'fw:select_job',
+
   // Fantasy Wars — 거점/스킬/던전 — Client -> Server
   FW_CAPTURE_START:  'fw:capture_start',
   FW_CAPTURE_CANCEL: 'fw:capture_cancel',
+  // 다른 길드의 점령 진행을 명시적으로 방해(=취소)한다. 점령 시작 자체는 적이
+  // zone 안에 있어도 막지 않으며, 적군이 직접 이 이벤트를 emit 해야만 진행이
+  // 끊긴다.
+  FW_CAPTURE_DISRUPT: 'fw:capture_disrupt',
   FW_USE_SKILL:      'fw:use_skill',
   FW_ATTACK:         'fw:attack',
   FW_REVIVE:         'fw:revive',
   FW_DUNGEON_ENTER:  'fw:dungeon_enter',
 
   // Fantasy Wars — 대결 — Client -> Server
-  FW_DUEL_CHALLENGE: 'fw:duel:challenge',
-  FW_DUEL_ACCEPT:    'fw:duel:accept',
-  FW_DUEL_REJECT:    'fw:duel:reject',
-  FW_DUEL_CANCEL:    'fw:duel:cancel',
-  FW_DUEL_SUBMIT:    'fw:duel:submit',
+  FW_DUEL_CHALLENGE:    'fw:duel:challenge',
+  FW_DUEL_ACCEPT:       'fw:duel:accept',
+  FW_DUEL_REJECT:       'fw:duel:reject',
+  FW_DUEL_CANCEL:       'fw:duel:cancel',
+  FW_DUEL_SUBMIT:       'fw:duel:submit',
+  // 턴 기반 미니게임(예: 러시안 룰렛) 의 actor 액션. payload: { duelId, action }.
+  FW_DUEL_ACTION:       'fw:duel:action',
+  // 클라가 VS intro + briefing 을 모두 끝내고 실제 미니게임 화면이 보이는 시점에 emit.
+  // 서버는 이 신호를 받고서야 GAME_TIMEOUT_MS 본 타이머를 시작한다.
+  FW_DUEL_PLAY_STARTED: 'fw:duel:play_started',
 
   // Fantasy Wars — 거점/스킬/던전 — Server -> Client
   FW_CAPTURE_STARTED:  'fw:capture_started',
@@ -68,6 +80,7 @@ export const EVENTS = {
   FW_PLAYER_ELIMINATED:'fw:player_eliminated',
   FW_PLAYER_REVIVED:   'fw:player_revived',
   FW_REVIVE_FAILED:    'fw:revive_failed',
+  FW_REVIVE_READY:     'fw:revive_ready',
   FW_ARTIFACT_TAKEN:   'fw:artifact_taken',
   FW_ARTIFACT_DROPPED: 'fw:artifact_dropped',
   FW_DUNGEON_CLEARED:  'fw:dungeon_cleared',
@@ -90,6 +103,11 @@ export const EVENTS = {
   FW_DUEL_REJECTED:    'fw:duel:rejected',
   FW_DUEL_CANCELLED:   'fw:duel:cancelled',
   FW_DUEL_STARTED:     'fw:duel:started',
+  // play_started 신호로 본 게임 타이머가 가동되었음을 두 클라에 통보. 클라는 이 startedAt
+  // 으로 displayed timer 를 동기화한다.
+  FW_DUEL_PLAY_ARMED:  'fw:duel:play_armed',
+  // 턴 기반 미니게임 의 새 public state broadcast. payload: { duelId, minigameType, state }.
+  FW_DUEL_STATE:       'fw:duel:state',
   FW_DUEL_RESULT:      'fw:duel:result',
   FW_DUEL_INVALIDATED: 'fw:duel:invalidated',
   FW_DUEL_LOG:         'fw:duel_log',

@@ -2,6 +2,7 @@
 
 import { configSchema, defaultConfig } from './schema.js';
 import { buildInitialPluginState } from './state.js';
+import { consumeJobPreferences } from '../../sessionJobSelections.js';
 import {
   getPublicState,
   getPrivateState,
@@ -21,7 +22,13 @@ const FantasyWarsArtifactPlugin = {
 
   async startSession({ session, members, config }) {
     const resolvedConfig = { ...defaultConfig, ...(config ?? {}) };
-    const pluginState = buildInitialPluginState(members, resolvedConfig, session);
+    const jobPreferences = consumeJobPreferences(session?.id ?? session?.session_id);
+    const pluginState = buildInitialPluginState(
+      members,
+      resolvedConfig,
+      session,
+      jobPreferences,
+    );
 
     const gameState = {
       gameType: FANTASY_WARS_GAME_TYPE,
@@ -99,10 +106,11 @@ const FantasyWarsArtifactPlugin = {
     ].join('\n');
   },
 
-  // 현재 FW 지식베이스는 role: 'all' 태그만 사용한다.
-  // 직업/길드 ID로 RAG를 필터링하면 결과가 비어 응답 품질이 떨어진다.
-  getKnowledgeRole() {
-    return 'all';
+  // 직업별 chunk 분화 후 (PR K2): player.job 을 그대로 RPC 의 p_role 로 넘긴다.
+  // RPC 가 (gr.role = p_role OR gr.role = 'all') 폴백을 하므로 직업 전용 chunk +
+  // 일반 'all' chunk 가 모두 후보로 들어가 응답 품질 ↑. job 이 비어 있으면 'all' 폴백.
+  getKnowledgeRole(player) {
+    return player?.job ?? 'all';
   },
 
   buildStateContext(gameState, player) {

@@ -4,7 +4,7 @@
 // Revive — dungeon periodic revive timer management + chance calculator
 // ─────────────────────────────────────────────────────────────────────────────
 
-const DUNGEON_REVIVE_INTERVAL_MS = 60_000;
+export const DUNGEON_REVIVE_INTERVAL_MS = 60_000;
 
 // Module-level map: `${sessionId}:${userId}` → timeoutId
 const dungeonTimers = new Map();
@@ -20,7 +20,10 @@ export function calcReviveChance(reviveAttempts, baseChance, stepChance, maxChan
 // onAttempt will be called with no args.
 export function scheduleDungeonRevive(key, onAttempt) {
   cancelDungeonTimer(key);
-  const id = setTimeout(onAttempt, DUNGEON_REVIVE_INTERVAL_MS);
+  const id = setTimeout(() => {
+    dungeonTimers.delete(key);
+    onAttempt();
+  }, DUNGEON_REVIVE_INTERVAL_MS);
   dungeonTimers.set(key, id);
 }
 
@@ -40,6 +43,8 @@ export function applyReviveSuccess(player, gameState) {
   player.reviveAttempts   = 0;
   player.remainingLives   = player.job === 'warrior' ? 2 : 1;
   player.dungeonEnteredAt = null;
+  player.nextReviveAt     = null;
+  player.reviveReady      = false;
   player.inDuel           = false;
   player.duelExpiresAt    = null;
 
@@ -49,3 +54,4 @@ export function applyReviveSuccess(player, gameState) {
   }
   ps.eliminatedPlayerIds = (ps.eliminatedPlayerIds ?? []).filter(id => id !== player.userId);
 }
+

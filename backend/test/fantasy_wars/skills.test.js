@@ -96,6 +96,46 @@ test('blockade, reveal, and execution effects update state as expected', () => {
   assert.equal(isExecutionArmed(rogue, 66_000), false);
 });
 
+test('blockade on a CP that is being captured applies blockade AND signals capture disrupt', () => {
+  const mage = makePlayer({ userId: 'mage-2', job: 'mage', guildId: 'guild_alpha' });
+  // 진행 중 점령: capturingGuild 가 적 길드.
+  const cp = makeControlPoint({
+    id: 'cp-9',
+    capturingGuild: 'guild_beta',
+    captureStartedAt: 1000,
+    captureProgress: 40,
+    requiredCount: 2,
+    readyCount: 2,
+  });
+
+  const result = applySkillEffect('blockade', { player: mage, cp, now: 5000 });
+  assert.deepEqual(result, {
+    type: 'blockade',
+    cpId: 'cp-9',
+    expiresAt: 65_000,
+    disrupted: true,
+    interruptedGuild: 'guild_beta',
+  });
+
+  // 봉쇄는 정상 적용된다 (지속시간 60s).
+  assert.equal(cp.blockadedBy, mage.guildId);
+  assert.equal(cp.blockadeExpiresAt, 65_000);
+  // capture state 클린업은 핸들러가 책임 — applySkillEffect 자체는 capture 필드를
+  // 건드리지 않고 disrupted 플래그로 핸들러에 위임한다.
+  assert.equal(cp.capturingGuild, 'guild_beta');
+});
+
+test('blockade on idle CP still applies normally (regression)', () => {
+  const mage = makePlayer({ userId: 'mage-3', job: 'mage', guildId: 'guild_alpha' });
+  const cp = makeControlPoint({ id: 'cp-10' });
+
+  const result = applySkillEffect('blockade', { player: mage, cp, now: 7000 });
+  assert.equal(result.type, 'blockade');
+  assert.equal(result.disrupted, undefined);
+  assert.equal(result.expiresAt, 67_000);
+  assert.equal(cp.blockadedBy, mage.guildId);
+});
+
 test('shield helpers report and consume active shields', () => {
   const player = makePlayer({
     shields: [

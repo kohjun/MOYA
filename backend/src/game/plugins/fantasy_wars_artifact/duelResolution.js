@@ -10,6 +10,20 @@ export function clearDuelState(player) {
   player.duelExpiresAt = null;
 }
 
+export function eliminatePlayer(player, gameState) {
+  clearDuelState(player);
+  player.isAlive = false;
+  player.hp = 0;
+  player.remainingLives = 0;
+  player.captureZone = null;
+
+  const ps = gameState.pluginState ?? {};
+  gameState.alivePlayerIds = gameState.alivePlayerIds.filter((id) => id !== player.userId);
+  if (!(ps.eliminatedPlayerIds ?? []).includes(player.userId)) {
+    ps.eliminatedPlayerIds = [...(ps.eliminatedPlayerIds ?? []), player.userId];
+  }
+}
+
 export function resolveCombatBetweenPlayers({
   winner,
   loser,

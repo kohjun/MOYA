@@ -29,10 +29,10 @@ export function captureValidator(cp, player, options = {}) {
   if (options.requesterInZone === false) {
     return { ok: false, error: 'NOT_IN_CAPTURE_ZONE' };
   }
-  if ((options.enemyInZoneCount ?? 0) > 0) {
-    return { ok: false, error: 'ENEMY_IN_ZONE' };
-  }
-  if ((options.friendlyInZoneCount ?? 0) < 2) {
+  // 적군이 zone 안에 있어도 점령 시작 자체는 막지 않는다. 적은 capture_disrupt
+  // 이벤트를 명시적으로 보내야만 진행을 끊을 수 있다.
+  // 점령 최소 인원: 1명. SOLO / 소규모 세션에서도 단독 점령 가능.
+  if ((options.friendlyInZoneCount ?? 0) < 1) {
     return { ok: false, error: 'NOT_ENOUGH_TEAMMATES_IN_ZONE' };
   }
 
@@ -46,10 +46,10 @@ export function captureHoldValidator(cp, options = {}) {
   if (!cp.location) {
     return { ok: false, error: 'CP_LOCATION_UNSET' };
   }
-  if ((options.enemyInZoneCount ?? 0) > 0) {
-    return { ok: false, error: 'ENEMY_IN_ZONE' };
-  }
-  if ((options.friendlyInZoneCount ?? 0) < 2) {
+  // 점령 진행 중에 적군이 zone 으로 들어와도 자동 취소하지 않는다.
+  // 방해는 capture_disrupt 이벤트로만 이루어진다.
+  // 점령 최소 인원: 1명. SOLO / 소규모 세션에서도 단독 점령 가능.
+  if ((options.friendlyInZoneCount ?? 0) < 1) {
     return { ok: false, error: 'NOT_ENOUGH_TEAMMATES_IN_ZONE' };
   }
 
@@ -77,7 +77,8 @@ export function pruneCaptureIntents(intentMap, validUserIds, now, windowMs) {
 }
 
 export function isCaptureReady(intentMap, requiredUserIds) {
-  if (!Array.isArray(requiredUserIds) || requiredUserIds.length < 2) {
+  // 1인 점령 허용. captureIntent 가 비어 있는 호출만 차단.
+  if (!Array.isArray(requiredUserIds) || requiredUserIds.length < 1) {
     return false;
   }
 
@@ -99,8 +100,4 @@ export function cancelCaptureTimer(key) {
     clearTimeout(id);
     captureTimers.delete(key);
   }
-}
-
-export function hasCaptureTimer(key) {
-  return captureTimers.has(key);
 }

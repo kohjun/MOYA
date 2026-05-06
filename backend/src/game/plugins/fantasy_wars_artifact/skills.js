@@ -53,13 +53,23 @@ export function applySkillEffect(effect, { player, targetPlayer, cp, now = Date.
       if (!cp) {
         return null;
       }
+      // 점령 진행 중인 CP 에 봉쇄가 걸리면 봉쇄는 정상 적용되고, 봉쇄 효과로 점령이
+      // 강제 종료된다 (= 봉쇄 동안 다른 길드도 점령 불가). disrupted 플래그가 켜진
+      // result 를 본 핸들러가 resetCaptureState + cancelCaptureTimer +
+      // fw:capture_cancelled 까지 처리해 capture state 를 일관되게 클린업.
+      const interruptedGuild = cp.capturingGuild ?? null;
       cp.blockadedBy = player.guildId;
       cp.blockadeExpiresAt = now + BLOCKADE_DURATION_MS;
-      return {
+      const result = {
         type: 'blockade',
         cpId: cp.id,
         expiresAt: cp.blockadeExpiresAt,
       };
+      if (interruptedGuild) {
+        result.disrupted = true;
+        result.interruptedGuild = interruptedGuild;
+      }
+      return result;
     }
 
     case 'reveal': {
@@ -95,10 +105,6 @@ export function activeShields(player, now = Date.now()) {
   return (player?.shields ?? []).filter(
     (shield) => shield && (shield.expiresAt == null || shield.expiresAt > now),
   );
-}
-
-export function hasActiveShield(player, now = Date.now()) {
-  return activeShields(player, now).length > 0;
 }
 
 export function consumeShield(player, now = Date.now()) {

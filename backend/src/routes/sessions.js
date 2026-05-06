@@ -13,6 +13,8 @@ const createSessionSchema = z.object({
   name: z.string().max(100).optional(),
   activeModules: z.array(z.string()).max(10).optional(),
   durationHours: z.number().min(1).max(72).optional(),
+  // 신규 클라이언트는 분 단위(default 90)로 전달. 1분~7일 범위 허용.
+  durationMinutes: z.number().min(1).max(10080).optional(),
   maxMembers: z.number().min(2).max(50).optional(),
   gameType: z.string().optional(),
   gameConfig: z.record(z.unknown()).optional(),
