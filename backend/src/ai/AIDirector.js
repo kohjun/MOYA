@@ -232,13 +232,58 @@ async function cleanupRoom(roomId) {
 // Fantasy Wars 이벤트 핸들러
 // ─────────────────────────────────────────────────────────────────────────────
 
+// 이벤트 narration 용 systemPrompt 조립.
+// retrieve() 결과가 있으면 FW_SYSTEM_PROMPT 뒤에 [관련 게임 규칙] 블록을 붙여
+// AI 가 룰을 알고 멘트를 생성하도록 한다. retrieve 가 실패/0건이면 정적 프롬프트로
+// graceful fallback — narration 자체는 항상 정상 발화.
+async function buildNarrationSystem(query, room, { phase, role = 'all' } = {}) {
+  try {
+    const gameType = room?.gameType ?? 'fantasy_wars_artifact';
+    let resolvedPhase = phase;
+    if (!resolvedPhase) {
+      try {
+        const plugin = GamePluginRegistry.get(gameType);
+        resolvedPhase = plugin?.getCurrentPhase?.(room) ?? 'all';
+      } catch {
+        resolvedPhase = 'all';
+      }
+    }
+    const { context, sources, found } = await retrieve(
+      query,
+      gameType,
+      role,
+      resolvedPhase,
+    );
+    if (!found) {
+      return FW_SYSTEM_PROMPT;
+    }
+    if (sources?.length) {
+      console.log(
+        `[AIDirector.narration] retrieve hit (${sources.length}): ${sources.join(', ')}`,
+      );
+    }
+    return `${FW_SYSTEM_PROMPT}\n\n[관련 게임 규칙]\n${context}`;
+  } catch (error) {
+    console.warn(
+      '[AIDirector.narration] retrieve failed, using static prompt:',
+      error?.message ?? error,
+    );
+    return FW_SYSTEM_PROMPT;
+  }
+}
+
 async function fwOnGameStart(room) {
   const guildCount  = room.pluginState?.guilds ? Object.keys(room.pluginState.guilds).length : 3;
   const playerCount = room.alivePlayerIds?.length ?? 0;
   try {
+    const systemPrompt = await buildNarrationSystem(
+      `게임 시작 ${guildCount}길드 ${playerCount}명 승리 조건 게임 개요`,
+      room,
+      { phase: 'early' },
+    );
     return await chat({
       prompt: FW_PROMPTS.gameStart(guildCount, playerCount),
-      systemPrompt: FW_SYSTEM_PROMPT,
+      systemPrompt,
       model: 'fast',
       maxTokens: 1024,
     });
@@ -252,15 +297,24 @@ async function fwOnCpCaptured(room, guildId, cpName) {
   if (await isOnCooldown(`${room.roomId}_cp`, 4000)) return null;
   const cps        = room.pluginState?.controlPoints ?? [];
   const captured   = cps.filter(cp => cp.capturedBy === guildId).length;
+  const systemPrompt = await buildNarrationSystem(
+    `거점 점령 진행 ${captured}/${cps.length} 길드 ${guildId} 승리 조건`,
+    room,
+  );
   return chat({
     prompt: FW_PROMPTS.cpCaptured(guildId, cpName, captured, cps.length),
-    systemPrompt: FW_SYSTEM_PROMPT,
+    systemPrompt,
     model: 'fast',
   });
 }
 
 async function fwOnDuelResult(room, winner, loser, minigameType, executionTriggered) {
   if (await isOnCooldown(`${room.roomId}_duel`, 3000)) return null;
+  const flavor = executionTriggered ? '처형' : '결투 결과';
+  const systemPrompt = await buildNarrationSystem(
+    `결투 ${minigameType} ${flavor} 직업 효과`,
+    room,
+  );
   return chat({
     prompt: FW_PROMPTS.duelResult(
       winner?.nickname ?? winner?.userId ?? '?',
@@ -268,35 +322,52 @@ async function fwOnDuelResult(room, winner, loser, minigameType, executionTrigge
       minigameType,
       executionTriggered,
     ),
-    systemPrompt: FW_SYSTEM_PROMPT,
+    systemPrompt,
     model: 'fast',
   });
 }
 
 async function fwOnDuelDraw(room, minigameType) {
+  const systemPrompt = await buildNarrationSystem(
+    `결투 ${minigameType} 무승부 미니게임`,
+    room,
+  );
   return chat({
     prompt: FW_PROMPTS.duelDraw(minigameType),
-    systemPrompt: FW_SYSTEM_PROMPT,
+    systemPrompt,
     model: 'fast',
   });
 }
 
 async function fwOnPlayerEliminated(room, player) {
   if (await isOnCooldown(`${room.roomId}_elim`, 3000)) return null;
+  // role 을 player.job 으로 두면 RPC 가 그 직업 + 'all' 청크를 우선 매칭 →
+  // 직업별 청크가 KB 에 추가됐을 때 자동으로 활용된다 (현재는 모두 'all' 폴백).
+  const jobRole = player?.job ?? 'all';
+  const systemPrompt = await buildNarrationSystem(
+    `플레이어 탈락 ${player?.job ?? '직업'} 사망 처형`,
+    room,
+    { role: jobRole },
+  );
   return chat({
     prompt: FW_PROMPTS.playerEliminated(
       player?.nickname ?? player?.userId ?? '?',
       player?.guildId  ?? '?',
     ),
-    systemPrompt: FW_SYSTEM_PROMPT,
+    systemPrompt,
     model: 'fast',
   });
 }
 
 async function fwOnGameEnd(room, winnerGuildId, reason) {
+  const systemPrompt = await buildNarrationSystem(
+    `게임 종료 ${reason} 승리 길드 ${winnerGuildId} 결과`,
+    room,
+    { phase: 'late' },
+  );
   return chat({
     prompt: FW_PROMPTS.gameEnd(winnerGuildId, reason),
-    systemPrompt: FW_SYSTEM_PROMPT,
+    systemPrompt,
     model: 'fast',
   });
 }
