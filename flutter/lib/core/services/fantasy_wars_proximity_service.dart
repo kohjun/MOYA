@@ -60,17 +60,25 @@ class FantasyWarsProximityService {
     }
 
     final distanceMeters = mapState.memberDistances[targetUserId];
-    if (distanceMeters == null ||
-        !distanceMeters.isFinite ||
-        distanceMeters > gpsFallbackMaxRangeMeters) {
+
+    if (distanceMeters != null && !distanceMeters.isFinite) {
+      // Infinity/NaN 거리는 invalid 로 보고 차단. (이후 .round() 가 throw 되지 않도록 선차단)
       return null;
     }
 
+    if (distanceMeters != null &&
+        distanceMeters > gpsFallbackMaxRangeMeters) {
+      // 거리 정보가 있고 명확히 사거리 밖이면 차단.
+      return null;
+    }
+
+    // 거리 정보가 없거나(상대 위치가 private 이라 미수신) 사거리 내인 경우 →
+    // 클라이언트는 후보로 두고 서버 측 결투 신청 검증에 위임.
     return FwDuelProximityContext(
       targetUserId: targetUserId,
-      source: 'gps_fallback',
+      source: distanceMeters == null ? 'gps_fallback_unverified' : 'gps_fallback',
       seenAt: timestamp,
-      distanceMeters: distanceMeters.round(),
+      distanceMeters: distanceMeters?.round(),
     );
   }
 

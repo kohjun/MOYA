@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app_initialization_service.dart';
+import 'permission_lock.dart';
 import '../network/api_client.dart';
 
 class FcmService {
@@ -41,10 +42,15 @@ class FcmService {
     final messaging = FirebaseMessaging.instance;
     await messaging.setAutoInitEnabled(true);
 
-    final settings = await messaging.requestPermission(
-      alert: true,
-      badge: true,
-      sound: true,
+    // FCM/notification 권한도 BLE/GPS/Audio 와 같은 PermissionLock 으로 직렬화.
+    // 동시 진행 시 Android 가 "Can request only one set of permissions at a time"
+    // 로 거부하고 grantResults 가 비어 돌아오는 race 를 막는다.
+    final settings = await PermissionLock.run<NotificationSettings>(
+      () => messaging.requestPermission(
+        alert: true,
+        badge: true,
+        sound: true,
+      ),
     );
     debugPrint(
       '[FCM] Notification permission: ${settings.authorizationStatus.name}',

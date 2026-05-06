@@ -168,8 +168,10 @@ class Session {
 
   /// 플러그인 gameType (e.g. 'fantasy_wars_artifact')
   final String gameType;
+
   /// 플러그인별 설정 맵
   final Map<String, dynamic> gameConfig;
+
   /// 플러그인 버전
   final String gameVersion;
 
@@ -222,12 +224,14 @@ class Session {
         .toList();
 
     final rawGameType = m['game_type'] as String? ?? '';
-    final resolvedGameType = rawGameType.isEmpty ? 'fantasy_wars_artifact' : rawGameType;
+    final resolvedGameType =
+        rawGameType.isEmpty ? 'fantasy_wars_artifact' : rawGameType;
     final gameConfig = (m['game_config'] as Map<String, dynamic>?) ?? {};
     final rawFantasyTeams = gameConfig['teams'] as List<dynamic>? ?? const [];
     final rawControlPoints =
         gameConfig['controlPoints'] as List<dynamic>? ?? const [];
-    final rawSpawnZones = gameConfig['spawnZones'] as List<dynamic>? ?? const [];
+    final rawSpawnZones =
+        gameConfig['spawnZones'] as List<dynamic>? ?? const [];
 
     return Session(
       id: m['id'] as String,
@@ -284,7 +288,7 @@ class SessionRepository {
 
   Future<Session> createSession(
     String name,
-    int durationHours,
+    int durationMinutes,
     int maxMembers, {
     String gameType = 'fantasy_wars_artifact',
     Map<String, dynamic> gameConfig = const {},
@@ -294,7 +298,8 @@ class SessionRepository {
       '/sessions',
       data: {
         'name': name,
-        'durationHours': durationHours,
+        // 신규 백엔드는 durationMinutes 를 우선 사용. 모든 신규 세션은 90 분 기본.
+        'durationMinutes': durationMinutes,
         'maxMembers': maxMembers,
         'gameType': gameType,
         'gameConfig': gameConfig,
@@ -340,9 +345,8 @@ class SessionRepository {
     final res = await _api.patch(
       '/sessions/$sessionId/playable-area',
       data: {
-        'polygonPoints': points
-            .map((p) => {'lat': p['lat'], 'lng': p['lng']})
-            .toList(),
+        'polygonPoints':
+            points.map((p) => {'lat': p['lat'], 'lng': p['lng']}).toList(),
       },
     );
     final raw = res.data['playableArea'] as List<dynamic>? ?? [];
@@ -373,10 +377,11 @@ class SessionRepository {
         'spawnZones': spawnZones
             .map((zone) => {
                   'teamId': zone['teamId'],
-                  'polygonPoints': ((zone['polygonPoints'] as List?) ?? const [])
-                      .whereType<Map<String, double>>()
-                      .map((p) => {'lat': p['lat'], 'lng': p['lng']})
-                      .toList(),
+                  'polygonPoints':
+                      ((zone['polygonPoints'] as List?) ?? const [])
+                          .whereType<Map<String, double>>()
+                          .map((p) => {'lat': p['lat'], 'lng': p['lng']})
+                          .toList(),
                 })
             .toList(),
       },
@@ -469,7 +474,9 @@ class SessionListNotifier extends AsyncNotifier<List<Session>> {
 
   Future<Session> createSession(
     String name, {
-    int durationHours = 1,
+    // 모든 세션은 기본 90 분. 호출자가 명시적으로 다른 값을 줄 수 있지만 UI 에선
+    // 노출하지 않는다.
+    int durationMinutes = 90,
     int maxMembers = 3,
     String gameType = 'fantasy_wars_artifact',
     Map<String, dynamic> gameConfig = const {},
@@ -478,7 +485,7 @@ class SessionListNotifier extends AsyncNotifier<List<Session>> {
     try {
       final session = await ref.read(sessionRepositoryProvider).createSession(
             name,
-            durationHours,
+            durationMinutes,
             maxMembers,
             gameType: gameType,
             gameConfig: gameConfig,

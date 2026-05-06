@@ -68,6 +68,13 @@ class FantasyWarsBlePresenceService {
   String? _userId;
   bool _shouldRun = false;
   bool _isRunning = false;
+  // _peripheral.start() 가 한 번이라도 성공한 경우에만 stop() 을 호출.
+  // emulator/미지원 환경에서 stop() 을 부르면 flutter_ble_peripheral 플러그인이
+  // checkBluetoothState → requestPermission → onRequestPermissionsResult →
+  // 다시 checkBluetoothState 로 무한 재귀하다 StackOverflowError 로 앱 크래시.
+  bool _peripheralStarted = false;
+  // emulator 등 BLE peripheral 미지원 환경에서는 plugin 호출 자체를 회피.
+  bool _peripheralUnavailable = false;
   // hardware error → adapter restart 폭주 차단용.
   DateTime? _lastRestartAt;
   int _consecutiveFailures = 0;
@@ -105,6 +112,8 @@ class FantasyWarsBlePresenceService {
 
     if (await _isAndroidEmulator()) {
       debugPrint('[FW-BLE] emulator detected — BLE disabled');
+      // 이후 stop() 등에서 _peripheral 호출 자체를 차단해 권한 무한 루프 방지.
+      _peripheralUnavailable = true;
       _emitStatus(
         BlePresenceLifecycleState.unsupported,
         message: '에뮬레이터 환경 — BLE 비활성화',
@@ -152,9 +161,14 @@ class FantasyWarsBlePresenceService {
     await _scanSub?.cancel();
     _scanSub = null;
 
-    try {
-      await _peripheral.stop();
-    } catch (_) {}
+    // _peripheral.start() 가 성공한 적이 있을 때만 stop() 호출.
+    // emulator / 미지원 환경에서 stop() 을 부르면 권한 무한 루프 → 앱 크래시.
+    if (_peripheralStarted && !_peripheralUnavailable) {
+      try {
+        await _peripheral.stop();
+      } catch (_) {}
+      _peripheralStarted = false;
+    }
 
     await _statusSub?.cancel();
     _statusSub = null;
@@ -310,9 +324,16 @@ class FantasyWarsBlePresenceService {
       timeout: 0,
     );
 
-    try {
-      await _peripheral.stop();
-    } catch (_) {}
+    if (_peripheralUnavailable) {
+      return false;
+    }
+
+    if (_peripheralStarted) {
+      try {
+        await _peripheral.stop();
+      } catch (_) {}
+      _peripheralStarted = false;
+    }
 
     try {
       // hardware error / adapter restart 시 native 측이 응답 없이 hang 되는 경우
@@ -328,6 +349,7 @@ class FantasyWarsBlePresenceService {
               throw TimeoutException('BLE advertise start timeout');
             },
           );
+      _peripheralStarted = true;
       return true;
     } catch (error) {
       debugPrint('[FW-BLE] advertise start failed: $error');

@@ -26,6 +26,14 @@ const getWorkerCount = () => {
     return envWorkerCount;
   }
 
+  // 개발 환경에서는 9~15인 세션 규모로 충분하므로 워커 수를 작게 잡는다.
+  // 매 부팅마다 CPU 코어 수만큼(보통 16-24) 워커를 띄우면
+  // 노드 프로세스 시작 시간이 길어지고 dev 머신 리소스를 과점한다.
+  const isProduction = process.env.NODE_ENV === 'production';
+  if (!isProduction) {
+    return Math.min(Math.max(os.cpus().length, 1), 2);
+  }
+
   return Math.max(os.cpus().length, 1);
 };
 

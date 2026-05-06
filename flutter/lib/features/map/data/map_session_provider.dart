@@ -23,7 +23,22 @@ import '../../home/data/session_repository.dart';
 import '../../geofence/data/geofence_repository.dart';
 import '../presentation/map_session_models.dart';
 
-class MapSessionNotifier extends StateNotifier<MapSessionState> {
+// BLE presence enum 의 이름을 문자열로 변환. enum.name 게터에 의존하면
+// 빌드 캐시/hot-reload 불일치 시 NoSuchMethodError 가 polluting GC 까지 유발한
+// 사례가 있어, 명시적 매핑으로 안정화한다.
+String _blePresenceStateLabel(BlePresenceLifecycleState s) => switch (s) {
+      BlePresenceLifecycleState.idle => 'idle',
+      BlePresenceLifecycleState.unsupported => 'unsupported',
+      BlePresenceLifecycleState.requestingPermission => 'requestingPermission',
+      BlePresenceLifecycleState.permissionDenied => 'permissionDenied',
+      BlePresenceLifecycleState.bluetoothUnavailable => 'bluetoothUnavailable',
+      BlePresenceLifecycleState.starting => 'starting',
+      BlePresenceLifecycleState.running => 'running',
+      BlePresenceLifecycleState.error => 'error',
+    };
+
+class MapSessionNotifier extends StateNotifier<MapSessionState>
+    with WidgetsBindingObserver {
   MapSessionNotifier(this._sessionId, this._ref)
       : super(const MapSessionState(members: {})) {
     _init();
@@ -56,11 +71,35 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
   StreamSubscription? _bleStatusSub;
 
   Timer? _joinRetryTimer;
+  Timer? _backgroundStartTimer;
 
   final Map<String, MemberState> _pendingUpdates = {};
   Timer? _markerFlushTimer;
   final Stopwatch _startupStopwatch = Stopwatch();
   bool _backgroundServiceStartRequested = false;
+  bool _backgroundServiceConfigured = false;
+  bool _backgroundServiceRunning = false;
+
+  // NaverMap 첫 onMapReady 시그널. mediasoup Device.load(jingle_peerconnection_so)
+  // 와 BG service flutter engine boot 가 NaverMap PlatformView 첫 attach 와
+  // 같은 ~5초 윈도에 몰리면 Davey 4초+ 가 발생한다. 화면이 first map ready 를
+  // 알릴 때까지 두 작업을 미뤄 동시 폭주를 분산시킨다.
+  final Completer<void> _firstMapReadyCompleter = Completer<void>();
+  // 안전 fallback: NaverMap auth 실패/로딩 무한 대기 시에도 두 작업이 영원히
+  // 발화되지 않으면 안 되므로, 일정 시간 후 강제로 complete.
+  static const Duration _firstMapReadyTimeout = Duration(seconds: 8);
+
+  /// 게임 화면(`_handleNaverMapReady`)에서 호출. idempotent.
+  void signalFirstMapReady() {
+    if (_firstMapReadyCompleter.isCompleted) return;
+    _firstMapReadyCompleter.complete();
+  }
+
+  Future<void> _awaitFirstMapReady() async {
+    if (_firstMapReadyCompleter.isCompleted) return;
+    await _firstMapReadyCompleter.future
+        .timeout(_firstMapReadyTimeout, onTimeout: () {});
+  }
 
   final Set<String> _insideGeofences = {};
   List<dynamic> _currentGeofences = [];
@@ -69,6 +108,24 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
   DateTime? _lastMyPosAppliedAt;
   double? _lastMyPosLat;
   double? _lastMyPosLng;
+
+  // BLE sighting throttle 상태
+  // - 동일 userId 의 RSSI 변동이 임계 미만이면 350ms 단위로 batch flush.
+  // - 새 device, deviceId 변경, 임계 초과 변동은 즉시 emit.
+  static const int _bleRssiDeltaThreshold = 5; // dBm
+  static const Duration _bleFlushInterval = Duration(milliseconds: 350);
+  final Map<String, BleMemberContact> _pendingBleContacts = {};
+  Timer? _bleFlushTimer;
+
+  StreamSubscription<T> _listen<T>(
+    Stream<T> stream,
+    void Function(T data) onData,
+  ) {
+    return stream.listen((data) {
+      if (!mounted) return;
+      onData(data);
+    });
+  }
 
   void _logStartupStep(String label) {}
 
@@ -85,7 +142,22 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
     await _loadInitialMembers();
     _logStartupStep('loaded initial members');
 
-    unawaited(_prepareBackgroundService(prefs));
+    // BackgroundService 사전 시작은 WebRTC 까지 안정된 뒤로 더 미룬다.
+    // BG service 가 FlutterEngine 을 새로 띄우는 비용이 ~3-7초 Davey 의 직접
+    // 원인. Android 12+ 정책상 백그라운드 진입 후 startService 가 거부되므로
+    // 포그라운드인 지금 미리 startService 를 호출하되, foreground_active=true
+    // 플래그로 위치 추적은 멈춰 둔다.
+    //
+    // 추가로 NaverMap 첫 onMapReady 시그널을 기다린 뒤 1초 더 양보 — NaverMap
+    // PlatformView 첫 attach 와 BG flutter engine boot 가 같은 프레임에 메인
+    // 스레드를 점유하지 않게 분산.
+    unawaited(() async {
+      await _awaitFirstMapReady();
+      if (!mounted) return;
+      await Future<void>.delayed(const Duration(seconds: 1));
+      if (!mounted) return;
+      await _prepareBackgroundService(prefs);
+    }());
   }
 
   Future<void> _connectRealtime() async {
@@ -95,12 +167,15 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
         state = state.copyWith(isConnected: true, hasEverConnected: true);
         _socket.joinSession(_sessionId);
         _socket.requestGameState(_sessionId);
-        // mediasoup device load / transport 생성은 WebRTC 네이티브 호출이
-        // 많아 메인 스레드에 부담을 준다. 맵 첫 프레임 이후로 밀어 초기
-        // 렌더 구간과 겹치지 않게 한다.
+        // mediasoup device load / transport 생성은 WebRTC 네이티브 라이브러리
+        // (jingle_peerconnection_so) 로딩이 무거워 메인 스레드를 길게 점유한다.
+        // NaverMap PlatformView 첫 attach 와 같은 프레임에 충돌하면 Davey 2~3초.
+        // → onMapReady 시그널을 기다린 뒤 짧은 추가 지연(500ms)으로 분산.
         unawaited(() async {
+          await _awaitFirstMapReady();
+          if (!mounted) return;
           await WidgetsBinding.instance.endOfFrame;
-          await Future<void>.delayed(const Duration(milliseconds: 400));
+          await Future<void>.delayed(const Duration(milliseconds: 500));
           if (!mounted) return;
           await _audio.ensureJoined(_sessionId);
         }());
@@ -110,9 +185,12 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
     }
   }
 
-  // 백그라운드 서비스는 앱이 background로 내려갈 때만 시작한다.
-  // startService()는 새 Flutter 엔진을 생성해 메인 스레드를 ~16초 블로킹하므로
-  // 포그라운드에서는 절대 호출하지 않는다. 이 메서드는 설정(configure)만 수행한다.
+  // Android 12+ 는 앱이 백그라운드로 내려간 뒤에 location FGS 를 시작하려고 하면
+  // ForegroundServiceStartNotAllowedException 으로 거부한다. 그래서 서비스는
+  // 포그라운드 상태에서 미리 startService() 까지 호출해 두고,
+  // bg_foreground_active=true 플래그로 백그라운드 작업 자체는 멈춰 둔다.
+  // 앱이 실제로 백그라운드로 내려가면 setForegroundActive(false) invoke 만으로
+  // 위치 추적이 재개되므로 추가 startService 호출이 필요 없다.
   Future<void> _prepareBackgroundService(SharedPreferences prefs) async {
     if (_backgroundServiceStartRequested) return;
     _backgroundServiceStartRequested = true;
@@ -127,15 +205,121 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
       }
 
       await prefs.setBool('bg_active', true);
+      await prefs.setBool('bg_foreground_active', true);
       await initializeBackgroundService();
+      _backgroundServiceConfigured = true;
+
+      // Pre-start the service while still in foreground so the FGS notification
+      // is visible to Android. The service stays paused via foreground_active.
+      try {
+        final service = FlutterBackgroundService();
+        final running = await service.isRunning();
+        if (!running) {
+          await service.startService();
+        }
+        service.invoke('setForegroundActive', {'active': true});
+        _backgroundServiceRunning = true;
+      } catch (e) {
+        debugPrint('[Background] foreground pre-start failed: $e');
+      }
     } catch (e) {
       debugPrint('[Background] Failed to configure background service: $e');
       _backgroundServiceStartRequested = false;
     }
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_enterForegroundMode());
+      return;
+    }
+
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached ||
+        state.name == 'hidden') {
+      unawaited(_enterBackgroundMode());
+    }
+  }
+
+  Future<void> _enterForegroundMode() async {
+    _backgroundStartTimer?.cancel();
+    _backgroundStartTimer = null;
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('bg_active', true);
+      await prefs.setBool('bg_foreground_active', true);
+    } catch (_) {}
+
+    // 서비스를 멈추는 대신 setForegroundActive(true) 만 보내 추적을 일시정지한다.
+    // 매 lifecycle 마다 stopService 후 백그라운드에서 startService 재호출하면
+    // Android 가 FGS 시작을 거부하거나 추가 Flutter 엔진이 생성된다.
+    try {
+      final service = FlutterBackgroundService();
+      service.invoke('setForegroundActive', {'active': true});
+    } catch (e) {
+      debugPrint('[Background] foreground handoff failed: $e');
+    }
+  }
+
+  Future<void> _enterBackgroundMode() async {
+    if (!mounted) return;
+
+    _backgroundStartTimer?.cancel();
+    _backgroundStartTimer = Timer(const Duration(milliseconds: 600), () {
+      unawaited(_resumeBackgroundTracking());
+    });
+  }
+
+  Future<void> _resumeBackgroundTracking() async {
+    if (!mounted) return;
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('bg_active', true);
+      await prefs.setBool('bg_foreground_active', false);
+
+      final service = FlutterBackgroundService();
+
+      // 이미 포그라운드에서 서비스가 정상 시작된 상태라면 invoke 하나만 보내고 끝낸다.
+      if (_backgroundServiceRunning) {
+        service.invoke('setForegroundActive', {'active': false});
+        return;
+      }
+
+      // 서비스가 어떤 이유로든 아직 살아있지 않으면 한 번 더 시도한다.
+      // 이때도 startService 자체는 _prepareBackgroundService 가 포그라운드에서
+      // 이미 호출했어야 하는 게 정상 흐름이다.
+      if (!_backgroundServiceConfigured) {
+        await _prepareBackgroundService(prefs);
+      }
+
+      service.invoke('setForegroundActive', {'active': false});
+
+      final running = await service.isRunning();
+      if (!running) {
+        // 포그라운드 사전 시작이 실패한 fallback 경로. 여기서 startService 가
+        // ForegroundServiceStartNotAllowedException 으로 거부될 수 있으므로
+        // 예외를 그대로 삼키고 다음 resume 때 다시 시도하도록 둔다.
+        try {
+          await service.startService();
+          _backgroundServiceRunning = true;
+        } catch (e) {
+          debugPrint('[Background] deferred startService failed: $e');
+        }
+      } else {
+        _backgroundServiceRunning = true;
+      }
+      debugPrint('[Background] resumed tracking after app backgrounded');
+    } catch (e) {
+      debugPrint('[Background] background resume failed: $e');
+    }
+  }
+
   Future<void> _init() async {
     _startupStopwatch.start();
+    WidgetsBinding.instance.addObserver(this);
     final cachedSessions = _ref.read(sessionListProvider).valueOrNull ?? [];
     final cached = cachedSessions.where((s) => s.id == _sessionId);
 
@@ -170,21 +354,21 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
   }
 
   void _bindSocketStreams() {
-    _kickedSub = _socket.onKicked.listen((data) {
+    _kickedSub = _listen(_socket.onKicked, (data) {
       state = state.copyWith(wasKicked: true);
     });
 
-    _sessionExpiredSub = _socket.onSessionExpired.listen((data) {
+    _sessionExpiredSub = _listen(_socket.onSessionExpired, (data) {
       debugPrint('[Map] 세션 만료 수신: ${data['message']}');
       state = state.copyWith(wasKicked: true);
     });
 
-    _proximityKilledSub = _socket.onProximityKilled.listen((data) {
+    _proximityKilledSub = _listen(_socket.onProximityKilled, (data) {
       debugPrint('[Map] proximity:killed 수신 - killedBy: ${data['killedBy']}');
       state = state.copyWith(isEliminated: true);
     });
 
-    _playerEliminatedSub = _socket.onPlayerEliminated.listen((data) {
+    _playerEliminatedSub = _listen(_socket.onPlayerEliminated, (data) {
       final eliminatedId = data['userId'] as String?;
       if (eliminatedId == null) return;
       debugPrint('[Map] player:eliminated 수신 - userId: $eliminatedId');
@@ -193,12 +377,12 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
       );
     });
 
-    _gameStateSub = _socket.onGameStateUpdate.listen((data) {
+    _gameStateSub = _listen(_socket.onGameStateUpdate, (data) {
       state = state.copyWith(gameState: GameState.fromMap(data));
       unawaited(_syncBlePresenceLifecycle());
     });
 
-    _gameOverSub = _socket.onGameOver.listen((data) {
+    _gameOverSub = _listen(_socket.onGameOver, (data) {
       state = state.copyWith(
         gameState: GameState(
           status: 'finished',
@@ -208,7 +392,7 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
       unawaited(_syncBlePresenceLifecycle());
     });
 
-    _roleChangedSub = _socket.onRoleChanged.listen((data) {
+    _roleChangedSub = _listen(_socket.onRoleChanged, (data) {
       final userId = data['userId'] as String?;
       final role = data['role'] as String?;
       if (userId == null || role == null) return;
@@ -223,7 +407,7 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
       }
     });
 
-    _connectionSub = _socket.onConnectionChange.listen((connected) {
+    _connectionSub = _listen(_socket.onConnectionChange, (connected) {
       state = state.copyWith(
         isConnected: connected,
         hasEverConnected: connected ? true : state.hasEverConnected,
@@ -240,7 +424,12 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
       }
     });
 
-    _markerFlushTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+    // 피어 위치 업데이트는 누적해서 800ms 간격으로 한 번만 state 갱신.
+    // 500ms 였을 때 매 frame 단위로 widget tree rebuild 가 일어나 GPU 부담이 컸음.
+    // 800ms 면 마커 이동이 여전히 부드럽고, fwState 와 합쳐 평균 rebuild 빈도가
+    // 절반 가까이 떨어진다.
+    _markerFlushTimer = Timer.periodic(const Duration(milliseconds: 800), (_) {
+      if (!mounted) return;
       if (_pendingUpdates.isEmpty) return;
       final updated = Map<String, MemberState>.from(state.members)
         ..addAll(_pendingUpdates);
@@ -248,7 +437,7 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
       state = state.copyWith(members: updated);
     });
 
-    _locationSub = _socket.onLocationChanged.listen((payload) {
+    _locationSub = _listen(_socket.onLocationChanged, (payload) {
       if (payload.sessionId != null && payload.sessionId != _sessionId) {
         return;
       }
@@ -284,7 +473,7 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
             );
     });
 
-    _memberJoinSub = _socket.onMemberJoined.listen((data) {
+    _memberJoinSub = _listen(_socket.onMemberJoined, (data) {
       final userId = data['userId'] as String? ?? '';
       final nickname = data['nickname'] as String? ?? userId;
       final updated = Map<String, MemberState>.from(state.members);
@@ -302,7 +491,7 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
       unawaited(_syncBlePresenceLifecycle());
     });
 
-    _memberLeftSub = _socket.onMemberLeft.listen((data) {
+    _memberLeftSub = _listen(_socket.onMemberLeft, (data) {
       final userId = data['userId'] as String? ?? '';
       final updated = Map<String, MemberState>.from(state.members)
         ..remove(userId);
@@ -310,7 +499,7 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
       unawaited(_syncBlePresenceLifecycle());
     });
 
-    _statusSub = _socket.onStatusChanged.listen((data) {
+    _statusSub = _listen(_socket.onStatusChanged, (data) {
       final userId = data['userId'] as String? ?? '';
       final status = data['status'] as String? ?? 'idle';
       final battery = data['battery'] as int?;
@@ -322,14 +511,14 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
       }
     });
 
-    _sosSub = _socket.onSosAlert.listen((_) {
+    _sosSub = _listen(_socket.onSosAlert, (_) {
       state = state.copyWith(sosTriggered: true);
       Future.delayed(const Duration(seconds: 10), () {
         if (mounted) state = state.copyWith(sosTriggered: false);
       });
     });
 
-    _snapshotSub = _socket.onSnapshot.listen((data) {
+    _snapshotSub = _listen(_socket.onSnapshot, (data) {
       final members = data['members'] as List<dynamic>? ?? [];
       final locations =
           (data['locations'] as Map?)?.cast<String, dynamic>() ?? const {};
@@ -379,23 +568,48 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
       blePresenceMessage: _ble.status.message,
     );
 
-    _bleSightingSub = _ble.sightings.listen((sighting) {
-      final updated = Map<String, BleMemberContact>.from(state.bleContacts)
-        ..[sighting.userId] = BleMemberContact(
-          userId: sighting.userId,
-          rssi: sighting.rssi,
-          seenAtMs: sighting.seenAtMs,
-          deviceId: sighting.deviceId,
-        );
-      state = state.copyWith(bleContacts: updated);
+    _bleSightingSub = _listen(_ble.sightings, (sighting) {
+      final next = BleMemberContact(
+        userId: sighting.userId,
+        rssi: sighting.rssi,
+        seenAtMs: sighting.seenAtMs,
+        deviceId: sighting.deviceId,
+      );
+      _pendingBleContacts[sighting.userId] = next;
+
+      // 즉시 emit 조건: 새 contact / deviceId 변경 / RSSI 임계 초과 변동.
+      // 그 외에는 350ms 후 batch flush 로 합쳐 rebuild 폭주 방지.
+      final existing = state.bleContacts[sighting.userId];
+      final isNew = existing == null;
+      final deviceChanged =
+          existing != null && existing.deviceId != sighting.deviceId;
+      final rssiDelta =
+          existing == null ? 0 : (sighting.rssi - existing.rssi).abs();
+      if (isNew || deviceChanged || rssiDelta >= _bleRssiDeltaThreshold) {
+        _flushPendingBleContacts();
+        return;
+      }
+
+      _bleFlushTimer ??= Timer(_bleFlushInterval, _flushPendingBleContacts);
     });
 
-    _bleStatusSub = _ble.statuses.listen((status) {
+    _bleStatusSub = _listen(_ble.statuses, (status) {
       state = state.copyWith(
-        blePresenceStatus: status.state.name,
+        blePresenceStatus: _blePresenceStateLabel(status.state),
         blePresenceMessage: status.message,
       );
     });
+  }
+
+  void _flushPendingBleContacts() {
+    _bleFlushTimer?.cancel();
+    _bleFlushTimer = null;
+    if (!mounted) return;
+    if (_pendingBleContacts.isEmpty) return;
+    final updated = Map<String, BleMemberContact>.from(state.bleContacts)
+      ..addAll(_pendingBleContacts);
+    _pendingBleContacts.clear();
+    state = state.copyWith(bleContacts: updated);
   }
 
   // BLE는 결투 수락 시점에 BleDuelNotifier가 관리하므로
@@ -406,8 +620,8 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
     try {
       _gps.setSessionId(_sessionId);
       await _gps.startTracking();
-      _myPositionSub = _gps.positionStream.listen((pos) {
-        // ── Throttle: 1.5초 미만 & 5m 미만 이동은 무시 (rebuild 폭주 방지) ──
+      _myPositionSub = _listen(_gps.positionStream, (pos) {
+        // ── Throttle: 2.5초 미만 & 8m 미만 이동은 무시 (NaverMap rebuild 폭주 방지) ──
         final now = DateTime.now();
         final movedEnough = _lastMyPosLat == null ||
             _haversineMeters(
@@ -416,9 +630,9 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
                   pos.latitude,
                   pos.longitude,
                 ) >=
-                5.0;
+                8.0;
         final timeEnough = _lastMyPosAppliedAt == null ||
-            now.difference(_lastMyPosAppliedAt!).inMilliseconds >= 1500;
+            now.difference(_lastMyPosAppliedAt!).inMilliseconds >= 2500;
         if (!movedEnough && !timeEnough) {
           _checkGeofences(pos);
           return;
@@ -637,6 +851,11 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
   @override
   void dispose() {
     _joinRetryTimer?.cancel();
+    _backgroundStartTimer?.cancel();
+    if (!_firstMapReadyCompleter.isCompleted) {
+      _firstMapReadyCompleter.complete();
+    }
+    WidgetsBinding.instance.removeObserver(this);
     _markerFlushTimer?.cancel();
     _locationSub?.cancel();
     _memberJoinSub?.cancel();
@@ -655,12 +874,17 @@ class MapSessionNotifier extends StateNotifier<MapSessionState> {
     _gameOverSub?.cancel();
     _bleSightingSub?.cancel();
     _bleStatusSub?.cancel();
+    _bleFlushTimer?.cancel();
+    _pendingBleContacts.clear();
     _gps.setSessionId(null);
     _gps.stopTracking();
     unawaited(_ble.stop());
     unawaited(_audio.leaveSession());
     _socket.disconnect();
-    SharedPreferences.getInstance().then((p) => p.setBool('bg_active', false));
+    SharedPreferences.getInstance().then((p) async {
+      await p.setBool('bg_active', false);
+      await p.setBool('bg_foreground_active', false);
+    });
     FlutterBackgroundService().invoke('stopService');
     debugPrint('[Background] 포그라운드 서비스 종료 신호 발송');
     super.dispose();

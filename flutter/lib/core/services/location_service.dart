@@ -17,15 +17,15 @@ class LocationConfig {
   // background_service.dart 쪽에만 둡니다.
   static final AndroidSettings androidMoving = AndroidSettings(
     accuracy: LocationAccuracy.high,
-    intervalDuration: const Duration(seconds: 3),
-    distanceFilter: 10,
+    intervalDuration: const Duration(seconds: 5),
+    distanceFilter: 12,
   );
 
   // 정지 중: 배터리 절약 모드
   static final AndroidSettings androidIdle = AndroidSettings(
     accuracy: LocationAccuracy.medium,
-    intervalDuration: const Duration(seconds: 15),
-    distanceFilter: 20,
+    intervalDuration: const Duration(seconds: 30),
+    distanceFilter: 30,
   );
 
   static final AppleSettings iosSettings = AppleSettings(
@@ -145,10 +145,11 @@ class GpsLocationService {
     final speed = position.speed;
     _isMoving = speed > 0.5;
 
-    // 다운스트림 throttle: 2초 또는 5m 이상 이동 시에만 broadcast
+    // 다운스트림 throttle: 지도 platform view rebuild 폭주를 막기 위해
+    // 2.5초 또는 8m 이상 이동 시에만 UI/provider로 broadcast한다.
     final nowBroadcast = DateTime.now();
     final shouldBroadcast = _lastBroadcastAt == null ||
-        nowBroadcast.difference(_lastBroadcastAt!).inMilliseconds >= 2000 ||
+        nowBroadcast.difference(_lastBroadcastAt!).inMilliseconds >= 2500 ||
         (_lastBroadcastPosition != null &&
             Geolocator.distanceBetween(
                   _lastBroadcastPosition!.latitude,
@@ -156,7 +157,7 @@ class GpsLocationService {
                   position.latitude,
                   position.longitude,
                 ) >=
-                5.0);
+                8.0);
     if (shouldBroadcast) {
       _lastBroadcastAt = nowBroadcast;
       _lastBroadcastPosition = position;
@@ -169,7 +170,7 @@ class GpsLocationService {
         ? 999999
         : now.difference(_lastSentAt!).inMilliseconds;
 
-    if (timeSinceLast >= 3000) {
+    if (timeSinceLast >= 5000) {
       _sendToSocket(position);
       _lastSentAt = now;
     }

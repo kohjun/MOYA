@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import fastifyCors from '@fastify/cors';
 import fastifyCookie from '@fastify/cookie';
 import dotenv from 'dotenv';
+import * as Sentry from '@sentry/node';
 import { pathToFileURL } from 'node:url';
 
 import { connectRedis } from './config/redis.js';
@@ -52,6 +53,14 @@ const createFastifyApp = async () => {
 
   fastify.setErrorHandler((error, request, reply) => {
     fastify.log.error(error);
+    if (process.env.SENTRY_DSN) {
+      Sentry.captureException(error, {
+        tags: {
+          route: request.routeOptions?.url ?? request.url,
+          method: request.method,
+        },
+      });
+    }
     reply.code(500).send({
       error: 'INTERNAL_SERVER_ERROR',
       message: process.env.NODE_ENV === 'development' ? error.message : undefined,

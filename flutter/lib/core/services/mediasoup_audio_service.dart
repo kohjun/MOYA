@@ -8,7 +8,7 @@ import 'permission_lock.dart';
 import 'socket_service.dart';
 
 // VAD 설정
-const _kVadIntervalMs = 200;      // stats 폴링 주기 (ms)
+const _kVadIntervalMs = 200; // stats 폴링 주기 (ms)
 const _kSpeakingThreshold = 0.01; // 이 레벨 이상이면 말하는 중으로 판단
 const _kSpeakingDebounceMs = 600; // speaking→silent 전환 대기시간 (ms)
 
@@ -61,10 +61,15 @@ class MediaSoupAudioService {
   Timer? _vadTimer;
   final _speakingController = StreamController<bool>.broadcast();
 
+  // Join 단계 중 사용자에게 전달해야 하는 비치명적 에러
+  // ('voice_timeout', 'voice_failed'). UI 가 SnackBar 등으로 노출.
+  final _joinErrorController = StreamController<String>.broadcast();
+
   bool get isMuted => _isMuted;
   bool get isSpeaking => _isSpeaking;
   Stream<bool> get isMutedStream => _mutedController.stream;
   Stream<bool> get isSpeakingStream => _speakingController.stream;
+  Stream<String> get joinErrorStream => _joinErrorController.stream;
 
   bool get isReady =>
       _device != null && _recvTransport != null && _currentSessionId != null;
@@ -104,7 +109,7 @@ class MediaSoupAudioService {
     }
 
     _shouldAutoReconnect = true;
-    _joinFuture = _joinSession(sessionId).whenComplete(() {
+    _joinFuture = _joinSessionWithRetry(sessionId).whenComplete(() {
       _joinFuture = null;
     });
 
@@ -113,7 +118,39 @@ class MediaSoupAudioService {
 
   Future<void> _rejoinForChannelChange(String sessionId) async {
     await _closeMediaState(clearSession: false);
-    await _joinSession(sessionId);
+    await _joinSessionWithRetry(sessionId);
+  }
+
+  // 동시 join 시 서버 ack 가 늦게 오는 경우가 있어 1회 재시도. 두 번째 시도도
+  // 실패하면 UI 에 'voice_timeout' / 'voice_failed' 를 알려 사용자가 인지하도록.
+  Future<void> _joinSessionWithRetry(String sessionId) async {
+    const maxAttempts = 2;
+    for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await _joinSession(sessionId);
+        return;
+      } on TimeoutException catch (error) {
+        debugPrint(
+          '[MediaSoup] join attempt $attempt timed out: $error',
+        );
+        if (attempt >= maxAttempts) {
+          if (!_joinErrorController.isClosed) {
+            _joinErrorController.add('voice_timeout');
+          }
+          return;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 800));
+      } catch (error) {
+        debugPrint('[MediaSoup] join attempt $attempt failed: $error');
+        if (attempt >= maxAttempts) {
+          if (!_joinErrorController.isClosed) {
+            _joinErrorController.add('voice_failed');
+          }
+          return;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 800));
+      }
+    }
   }
 
   /// 이미 세션에 join된 상태에서 마이크 송출을 시작한다.
@@ -250,8 +287,11 @@ class MediaSoupAudioService {
     String event,
     Map<String, dynamic> payload, {
     bool allowJoinRetry = true,
+    Duration? timeout,
   }) async {
-    final response = await _socketService.emitWithAck(event, payload);
+    final response = timeout == null
+        ? await _socketService.emitWithAck(event, payload)
+        : await _socketService.emitWithAck(event, payload, timeout);
     if (response['ok'] == true) {
       return response;
     }
@@ -261,7 +301,7 @@ class MediaSoupAudioService {
         (errorCode == 'JOIN_SESSION_REQUIRED' ||
             errorCode == 'MISSING_SESSION_ID')) {
       await Future.delayed(const Duration(milliseconds: 250));
-      return _request(event, payload, allowJoinRetry: false);
+      return _request(event, payload, allowJoinRetry: false, timeout: timeout);
     }
 
     throw StateError('[$event] $errorCode');
@@ -280,6 +320,9 @@ class MediaSoupAudioService {
         'direction': 'recv',
         'channelId': _currentChannelId,
       },
+      // 다중 클라이언트가 동시에 transport 생성을 요청할 때 ack 가 늦어질 수
+      // 있어 기본 10s 보다 여유를 둔다.
+      timeout: const Duration(seconds: 15),
     );
 
     final transport = device.createRecvTransportFromMap(
@@ -311,6 +354,8 @@ class MediaSoupAudioService {
         'direction': 'send',
         'channelId': _currentChannelId,
       },
+      // recv transport 와 동일하게 ack 지연 흡수 위해 15s.
+      timeout: const Duration(seconds: 15),
     );
 
     final transport = device.createSendTransportFromMap(
@@ -341,8 +386,7 @@ class MediaSoupAudioService {
           'sessionId': sessionId,
           'direction': direction,
           'channelId': _currentChannelId,
-          'dtlsParameters':
-              (data['dtlsParameters'] as DtlsParameters).toMap(),
+          'dtlsParameters': (data['dtlsParameters'] as DtlsParameters).toMap(),
         },
       ).then((_) {
         (data['callback'] as Function).call();
@@ -361,8 +405,7 @@ class MediaSoupAudioService {
             'sessionId': sessionId,
             'kind': data['kind'],
             'channelId': _currentChannelId,
-            'rtpParameters':
-                (data['rtpParameters'] as RtpParameters).toMap(),
+            'rtpParameters': (data['rtpParameters'] as RtpParameters).toMap(),
           },
         );
 
@@ -773,5 +816,6 @@ class MediaSoupAudioService {
     _producerClosedSub = null;
     await _mutedController.close();
     await _speakingController.close();
+    await _joinErrorController.close();
   }
 }

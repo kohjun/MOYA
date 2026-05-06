@@ -5,6 +5,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
 import '../network/api_client.dart';
+import 'observability_service.dart';
 
 const _wsUrl = 'http://10.0.2.2:3000';
 
@@ -184,6 +185,11 @@ class SocketService {
       StreamController<Map<String, dynamic>>.broadcast();
   final _fwDuelInvalidatedController =
       StreamController<Map<String, dynamic>>.broadcast();
+  final _fwDuelStateController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  // play_armed: 서버가 본 게임 타이머를 가동할 때 startedAt + gameTimeoutMs 를 알려준다.
+  final _fwDuelPlayArmedController =
+      StreamController<Map<String, dynamic>>.broadcast();
 
   Stream<LocationPayload> get onLocationChanged => _locationController.stream;
   Stream<Map<String, dynamic>> get onMemberJoined =>
@@ -233,6 +239,12 @@ class SocketService {
       _fwDuelResultController.stream;
   Stream<Map<String, dynamic>> get onFwDuelInvalidated =>
       _fwDuelInvalidatedController.stream;
+  // 턴 기반 미니게임의 새 public state. payload: { duelId, minigameType, state }.
+  Stream<Map<String, dynamic>> get onFwDuelState =>
+      _fwDuelStateController.stream;
+  // 본 게임 타이머가 서버에서 가동되었음을 알린다. payload: { duelId, startedAt, gameTimeoutMs }.
+  Stream<Map<String, dynamic>> get onFwDuelPlayArmed =>
+      _fwDuelPlayArmedController.stream;
 
   bool get isConnected => _isConnected;
   String? get currentSessionId => _currentSessionId;
@@ -471,6 +483,9 @@ class SocketService {
       ..on(fwDuelResult, (data) => _fwDuelResultController.add(_toMap(data)))
       ..on(fwDuelInvalidated,
           (data) => _fwDuelInvalidatedController.add(_toMap(data)))
+      ..on(fwDuelState, (data) => _fwDuelStateController.add(_toMap(data)))
+      ..on(fwDuelPlayArmed,
+          (data) => _fwDuelPlayArmedController.add(_toMap(data)))
       ..on(fwDuelLog, (data) => _emitGameEvent(fwDuelLog, data))
 
       // Color Chaser broadcast
@@ -481,7 +496,33 @@ class SocketService {
       ..on(SocketEvents.ccCpClaimed,
           (data) => _emitGameEvent(SocketEvents.ccCpClaimed, data))
       ..on(SocketEvents.ccCpExpired,
-          (data) => _emitGameEvent(SocketEvents.ccCpExpired, data));
+          (data) => _emitGameEvent(SocketEvents.ccCpExpired, data))
+
+      // Fantasy Wars broadcast (capture / revive / skill / 탈락 알림).
+      // 빠지면 fantasy_wars_provider 의 onGameEvent listener 가 fire 되지 않아
+      // 부활 ready / 결과, 점령 진행률, 스킬 사용 등이 클라이언트에 전달되지 않는다.
+      ..on('fw:capture_progress',
+          (data) => _emitGameEvent('fw:capture_progress', data))
+      ..on('fw:capture_started',
+          (data) => _emitGameEvent('fw:capture_started', data))
+      ..on('fw:capture_complete',
+          (data) => _emitGameEvent('fw:capture_complete', data))
+      ..on('fw:capture_cancelled',
+          (data) => _emitGameEvent('fw:capture_cancelled', data))
+      ..on('fw:player_attacked',
+          (data) => _emitGameEvent('fw:player_attacked', data))
+      ..on('fw:player_eliminated',
+          (data) => _emitGameEvent('fw:player_eliminated', data))
+      ..on('fw:player_revived',
+          (data) => _emitGameEvent('fw:player_revived', data))
+      ..on('fw:revive_failed',
+          (data) => _emitGameEvent('fw:revive_failed', data))
+      ..on('fw:revive_ready', (data) => _emitGameEvent('fw:revive_ready', data))
+      ..on('fw:skill_cooldown',
+          (data) => _emitGameEvent('fw:skill_cooldown', data))
+      ..on('fw:skill_used', (data) => _emitGameEvent('fw:skill_used', data))
+      ..on(
+          'fw:player_skill', (data) => _emitGameEvent('fw:player_skill', data));
   }
 
   static Map<String, dynamic> _toMap(dynamic data) =>
@@ -624,6 +665,24 @@ class SocketService {
     Map<String, dynamic>? data,
     Duration timeout = const Duration(seconds: 10),
   ]) {
+    final observability = ObservabilityService();
+    return observability.traceAsync(
+      observability.socketTraceName(event),
+      () => _emitWithAck(event, data, timeout),
+      operation: 'socket.ack',
+      attributes: {
+        'socket_event': event,
+        if (event.startsWith('fw:')) 'game_plugin': 'fantasy_wars',
+      },
+      captureErrors: event.startsWith('fw:') || event.startsWith('game:'),
+    );
+  }
+
+  Future<Map<String, dynamic>> _emitWithAck(
+    String event, [
+    Map<String, dynamic>? data,
+    Duration timeout = const Duration(seconds: 10),
+  ]) {
     final socket = _socket;
     if (!_isConnected || socket == null) {
       return Future.error(Exception('SOCKET_DISCONNECTED'));
@@ -741,6 +800,8 @@ class SocketService {
     _fwDuelStartedController.close();
     _fwDuelResultController.close();
     _fwDuelInvalidatedController.close();
+    _fwDuelStateController.close();
+    _fwDuelPlayArmedController.close();
     for (final controller in _gameEventControllers.values) {
       controller.close();
     }
@@ -752,15 +813,23 @@ class SocketService {
   // ─────────────────────────────────────────────────────────────────────────
 
   // Client → Server
+  static const String fwSelectJob = 'fw:select_job';
   static const String fwCaptureStart = 'fw:capture_start';
   static const String fwCaptureCancel = 'fw:capture_cancel';
+  static const String fwCaptureDisrupt = 'fw:capture_disrupt';
   static const String fwUseSkill = 'fw:use_skill';
   static const String fwDungeonEnter = 'fw:dungeon_enter';
+  static const String fwRevive = 'fw:revive';
   static const String fwDuelChallenge = 'fw:duel:challenge';
   static const String fwDuelAccept = 'fw:duel:accept';
   static const String fwDuelReject = 'fw:duel:reject';
   static const String fwDuelCancel = 'fw:duel:cancel';
   static const String fwDuelSubmit = 'fw:duel:submit';
+  // 턴 기반 미니게임(러시안 룰렛 등) 의 actor 액션. payload: { duelId, action }.
+  static const String fwDuelAction = 'fw:duel:action';
+  // VS intro + briefing 끝나고 실제 미니게임 표시 시점에 emit. 서버는 이때 본 게임 타이머
+  // (GAME_TIMEOUT_MS) 를 가동한다.
+  static const String fwDuelPlayStarted = 'fw:duel:play_started';
 
   // Server → Client
   static const String fwDuelChallenged = 'fw:duel:challenged';
@@ -768,6 +837,10 @@ class SocketService {
   static const String fwDuelRejected = 'fw:duel:rejected';
   static const String fwDuelCancelled = 'fw:duel:cancelled';
   static const String fwDuelStarted = 'fw:duel:started';
+  // play_started 수신 후 본 게임 타이머가 가동되었음을 알림 (startedAt, gameTimeoutMs).
+  static const String fwDuelPlayArmed = 'fw:duel:play_armed';
+  // 턴 기반 미니게임의 새 public state broadcast.
+  static const String fwDuelState = 'fw:duel:state';
   static const String fwDuelResult = 'fw:duel:result';
   static const String fwDuelInvalidated = 'fw:duel:invalidated';
   static const String fwDuelLog = 'fw:duel_log';
@@ -865,6 +938,16 @@ class SocketService {
   // Fantasy Wars — 대결 액션 메서드
   // ─────────────────────────────────────────────────────────────────────────
 
+  Future<Map<String, dynamic>> sendFwSelectJob(
+    String sessionId,
+    String job,
+  ) {
+    return emitWithAck(fwSelectJob, {
+      'sessionId': sessionId,
+      'job': job,
+    });
+  }
+
   Future<Map<String, dynamic>> sendFwCaptureStart(
     String sessionId,
     String controlPointId,
@@ -880,6 +963,16 @@ class SocketService {
     String controlPointId,
   ) {
     return emitWithAck(fwCaptureCancel, {
+      'sessionId': sessionId,
+      'controlPointId': controlPointId,
+    });
+  }
+
+  Future<Map<String, dynamic>> sendFwCaptureDisrupt(
+    String sessionId,
+    String controlPointId,
+  ) {
+    return emitWithAck(fwCaptureDisrupt, {
       'sessionId': sessionId,
       'controlPointId': controlPointId,
     });
@@ -906,6 +999,12 @@ class SocketService {
     return emitWithAck(fwDungeonEnter, {
       'sessionId': sessionId,
       'dungeonId': dungeonId,
+    });
+  }
+
+  Future<Map<String, dynamic>> sendFwRevive(String sessionId) {
+    return emitWithAck(fwRevive, {
+      'sessionId': sessionId,
     });
   }
 
@@ -943,5 +1042,21 @@ class SocketService {
     Map<String, dynamic> result,
   ) {
     return emitWithAck(fwDuelSubmit, {'duelId': duelId, 'result': result});
+  }
+
+  /// 클라가 VS intro + briefing 을 끝내고 실제 미니게임 화면이 그려지는 시점에 emit.
+  /// 서버는 이 신호를 받고서야 GAME_TIMEOUT_MS 본 타이머를 가동한다. ack 응답으로
+  /// startedAt / gameTimeoutMs 가 돌아오지만 호출처는 보통 결과를 신경 쓰지 않아도 된다.
+  Future<Map<String, dynamic>> sendDuelPlayStarted(String duelId) {
+    return emitWithAck(fwDuelPlayStarted, {'duelId': duelId});
+  }
+
+  /// 턴 기반 미니게임용 액션 전송. action 페이로드는 미니게임별 schema (e.g. RR:
+  /// { 'chamber': 1..6, 'target': 'self'|'opponent' }).
+  Future<Map<String, dynamic>> sendDuelAction(
+    String duelId,
+    Map<String, dynamic> action,
+  ) {
+    return emitWithAck(fwDuelAction, {'duelId': duelId, 'action': action});
   }
 }

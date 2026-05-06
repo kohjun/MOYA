@@ -332,6 +332,21 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
                       const SizedBox(height: 16),
                       _FantasyWarsStartCard(status: startStatus!),
                       const SizedBox(height: 16),
+                      _FantasyWarsJobSelectCard(
+                        selectedJob: lobbyState.myJob,
+                        isSaving: lobbyState.isSavingJob,
+                        onSelect: (job) async {
+                          try {
+                            await ref
+                                .read(lobbyProvider(widget.sessionId).notifier)
+                                .selectJob(job);
+                          } catch (error) {
+                            if (!mounted) return;
+                            _showError('직업 선택 실패: $error');
+                          }
+                        },
+                      ),
+                      const SizedBox(height: 16),
                       _FantasyWarsDuelSettingsCard(
                         settings: duelSettings!,
                         isHost: isHost,
@@ -734,13 +749,211 @@ class _FantasyWarsStartCard extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              '직업은 게임 시작 시 각 길드 인원 순서에 맞춰 랜덤 배정됩니다.',
+              '직업은 아래 카드에서 선택할 수 있으며, 미선택 시 랜덤 배정됩니다.',
               style: TextStyle(
                 color: Colors.grey.shade700,
                 fontSize: 12,
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _FantasyWarsJobSelectCard extends StatelessWidget {
+  const _FantasyWarsJobSelectCard({
+    required this.selectedJob,
+    required this.isSaving,
+    required this.onSelect,
+  });
+
+  final String? selectedJob;
+  final bool isSaving;
+  final ValueChanged<String> onSelect;
+
+  static const List<_JobOption> _jobs = [
+    _JobOption(
+      id: 'warrior',
+      name: '전사',
+      description: '체력 2회. 패시브 중심.',
+      icon: Icons.shield,
+      color: Color(0xFFB45309),
+    ),
+    _JobOption(
+      id: 'priest',
+      name: '사제',
+      description: '아군 보호막을 부여한다.',
+      icon: Icons.healing,
+      color: Color(0xFF06B6D4),
+    ),
+    _JobOption(
+      id: 'mage',
+      name: '마법사',
+      description: '점령 봉쇄로 진행을 막는다.',
+      icon: Icons.auto_awesome,
+      color: Color(0xFF8B5CF6),
+    ),
+    _JobOption(
+      id: 'ranger',
+      name: '레인저',
+      description: '적 위치를 일시 추적한다.',
+      icon: Icons.visibility,
+      color: Color(0xFF10B981),
+    ),
+    _JobOption(
+      id: 'rogue',
+      name: '도적',
+      description: '결투 즉결로 처리할 수 있다.',
+      icon: Icons.local_fire_department,
+      color: Color(0xFFEF4444),
+    ),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    '직업 선택',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                ),
+                if (isSaving)
+                  const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '본인이 사용할 직업을 골라주세요. 미선택 시 랜덤 배정됩니다.',
+              style: TextStyle(color: Colors.grey.shade700, fontSize: 12),
+            ),
+            const SizedBox(height: 12),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final cardWidth = constraints.maxWidth >= 520
+                    ? (constraints.maxWidth - 24) / 3
+                    : (constraints.maxWidth - 12) / 2;
+                return Wrap(
+                  spacing: 12,
+                  runSpacing: 12,
+                  children: [
+                    for (final job in _jobs)
+                      SizedBox(
+                        width: cardWidth,
+                        child: _JobCard(
+                          option: job,
+                          selected: selectedJob == job.id,
+                          disabled: isSaving,
+                          onTap: () => onSelect(job.id),
+                        ),
+                      ),
+                  ],
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _JobOption {
+  const _JobOption({
+    required this.id,
+    required this.name,
+    required this.description,
+    required this.icon,
+    required this.color,
+  });
+
+  final String id;
+  final String name;
+  final String description;
+  final IconData icon;
+  final Color color;
+}
+
+class _JobCard extends StatelessWidget {
+  const _JobCard({
+    required this.option,
+    required this.selected,
+    required this.disabled,
+    required this.onTap,
+  });
+
+  final _JobOption option;
+  final bool selected;
+  final bool disabled;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final borderColor =
+        selected ? option.color : Colors.grey.shade300;
+    final bgColor = selected
+        ? option.color.withValues(alpha: 0.10)
+        : Colors.white;
+
+    return InkWell(
+      onTap: disabled ? null : onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Opacity(
+        opacity: disabled ? 0.6 : 1.0,
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: bgColor,
+            border: Border.all(
+              color: borderColor,
+              width: selected ? 2 : 1,
+            ),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(option.icon, color: option.color, size: 20),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      option.name,
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: selected ? option.color : Colors.black87,
+                      ),
+                    ),
+                  ),
+                  if (selected)
+                    Icon(Icons.check_circle, color: option.color, size: 18),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Text(
+                option.description,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: Colors.grey.shade700,
+                  height: 1.3,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -763,7 +976,8 @@ class _FantasyWarsDuelSettings {
 
   static _FantasyWarsDuelSettings fromSession(Session? session) {
     final config = session?.gameConfig ?? const <String, dynamic>{};
-    final allowGpsFallback = config['allowGpsFallbackWithoutBle'] as bool? ?? false;
+    // [DEV] 에뮬레이터 결투 테스트용 — 운영 배포 시 false 로 되돌릴 것.
+    final allowGpsFallback = config['allowGpsFallbackWithoutBle'] as bool? ?? true;
 
     return _FantasyWarsDuelSettings(
       bleRequired: !allowGpsFallback,

@@ -29,8 +29,13 @@ class LobbyState {
   final Session? sessionInfo;
   final bool isLoading;
   final Map<String, dynamic>? gameStartPayload;
+
   /// 현재 말하고 있는 userId 집합
   final Set<String> speakingUserIds;
+
+  /// 본인이 선택한 직업 (Fantasy Wars). null = 미선택 → 서버 랜덤
+  final String? myJob;
+  final bool isSavingJob;
 
   const LobbyState({
     this.members = const [],
@@ -39,6 +44,8 @@ class LobbyState {
     this.isLoading = true,
     this.gameStartPayload,
     this.speakingUserIds = const {},
+    this.myJob,
+    this.isSavingJob = false,
   });
 
   LobbyState copyWith({
@@ -48,6 +55,12 @@ class LobbyState {
     bool? isLoading,
     Map<String, dynamic>? gameStartPayload,
     Set<String>? speakingUserIds,
+    // myJob 은 nullable 이라 일반적인 `?? this.myJob` 패턴으론 명시적 null(클리어)을
+    // 표현할 수 없다. sentinel 객체를 기본값으로 두고, 호출자가 값을 안 넘기면 기존값
+    // 유지 / null 을 명시하면 클리어한다. selectJob 롤백 시 이전 값이 null 일 때
+    // 낙관적 업데이트가 제대로 되돌아오게 하는 데 필요.
+    Object? myJob = _kUnsetMyJob,
+    bool? isSavingJob,
   }) {
     return LobbyState(
       members: members ?? this.members,
@@ -56,9 +69,13 @@ class LobbyState {
       isLoading: isLoading ?? this.isLoading,
       gameStartPayload: gameStartPayload ?? this.gameStartPayload,
       speakingUserIds: speakingUserIds ?? this.speakingUserIds,
+      myJob: identical(myJob, _kUnsetMyJob) ? this.myJob : myJob as String?,
+      isSavingJob: isSavingJob ?? this.isSavingJob,
     );
   }
 }
+
+const Object _kUnsetMyJob = Object();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 로비 Notifier
@@ -264,15 +281,38 @@ class LobbyNotifier extends StateNotifier<LobbyState> {
         .moveMemberToTeam(_sessionId, userId, teamId);
   }
 
+  Future<void> selectJob(String job) async {
+    if (state.isSavingJob) return;
+    final previous = state.myJob;
+    state = state.copyWith(myJob: job, isSavingJob: true);
+    try {
+      final ack = await _socket.sendFwSelectJob(_sessionId, job);
+      final ok = ack['ok'] == true;
+      if (!ok) {
+        if (!mounted) return;
+        state = state.copyWith(myJob: previous, isSavingJob: false);
+        throw Exception(ack['error'] ?? 'SELECT_JOB_FAILED');
+      }
+      if (!mounted) return;
+      state = state.copyWith(isSavingJob: false);
+    } catch (e) {
+      debugPrint('[Lobby] selectJob failed: $e');
+      if (!mounted) return;
+      state = state.copyWith(myJob: previous, isSavingJob: false);
+      rethrow;
+    }
+  }
+
   Future<void> updateFantasyWarsDuelConfig({
     bool? allowGpsFallbackWithoutBle,
     int? bleEvidenceFreshnessMs,
   }) async {
-    final session = await _ref.read(sessionRepositoryProvider).updateFantasyWarsDuelConfig(
-          _sessionId,
-          allowGpsFallbackWithoutBle: allowGpsFallbackWithoutBle,
-          bleEvidenceFreshnessMs: bleEvidenceFreshnessMs,
-        );
+    final session =
+        await _ref.read(sessionRepositoryProvider).updateFantasyWarsDuelConfig(
+              _sessionId,
+              allowGpsFallbackWithoutBle: allowGpsFallbackWithoutBle,
+              bleEvidenceFreshnessMs: bleEvidenceFreshnessMs,
+            );
     if (!mounted) {
       return;
     }
