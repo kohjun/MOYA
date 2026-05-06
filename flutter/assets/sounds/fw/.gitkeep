@@ -1,0 +1,17 @@
+# 판타지 워즈 알림 사운드 자산.
+# 13개 mp3 파일이 들어갈 자리. 자산이 없어도 텍스트/햅틱 알림은 정상 작동.
+#
+# 파일명 (notification_catalog.dart 의 soundAsset 경로 매핑):
+# - cp_captured_us.mp3
+# - cp_captured_enemy.mp3
+# - cp_warning.mp3
+# - blockade_seal.mp3
+# - duel_challenge.mp3
+# - duel_won.mp3
+# - duel_lost.mp3
+# - shield_block.mp3
+# - eliminated.mp3
+# - revive.mp3
+# - master_down.mp3
+# - victory.mp3
+# - defeat.mp3

@@ -72,13 +72,20 @@ class _PlayableAreaPainterScreenState
   }
 
   Future<void> _loadCurrentPosition() async {
+    // 에뮬레이터처럼 GPS 가 없는 환경에선 high accuracy 가 timeout 없이 무한 대기한다.
+    // 그러면 _bootstrap 의 Future.wait 가 끝나지 않아 _isLoading 이 true 로 박혀
+    // NaverMap 위젯 자체가 mount 되지 않는다 ("지도가 안 뜬다" 의 원인).
+    // medium accuracy + 5초 timeout 으로 막아두고, 실패하면 기본 위치(서울시청)
+    // 로 fallback 해 화면은 즉시 뜨게 한다.
     try {
       final pos = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
+        desiredAccuracy: LocationAccuracy.medium,
+        timeLimit: const Duration(seconds: 5),
       );
       _initialPosition = NLatLng(pos.latitude, pos.longitude);
-    } catch (_) {
-      // Keep default center.
+    } catch (e) {
+      debugPrint(
+          '[PlayableAreaPainter] getCurrentPosition fallback to default: $e');
     }
   }
 

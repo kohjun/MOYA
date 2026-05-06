@@ -10,7 +10,7 @@ class FantasyWarsUiPlugin implements GameUiPlugin {
   String get gameType => 'fantasy_wars_artifact';
 
   @override
-  String get displayName => '판타지 워즈: 성유물 쟁탈전';
+  String get displayName => '판타지 워즈';
 
   @override
   int get minPlayers => 9;

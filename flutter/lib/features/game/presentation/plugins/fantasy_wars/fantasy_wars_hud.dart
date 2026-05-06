@@ -1,15 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
 import '../../../providers/fantasy_wars_provider.dart';
+import 'fantasy_wars_design_tokens.dart';
 
-const _guildColors = <String, Color>{
-  'guild_alpha': Color(0xFFEF4444),
-  'guild_beta': Color(0xFF3B82F6),
-  'guild_gamma': Color(0xFF22C55E),
-  'guild_delta': Color(0xFFF59E0B),
-};
-
-Color guildColor(String? guildId) => _guildColors[guildId] ?? Colors.grey;
+Color guildColor(String? guildId) => FwColors.teamFromGuildId(guildId);
 
 class FwTopHud extends StatelessWidget {
   const FwTopHud({
@@ -26,109 +21,96 @@ class FwTopHud extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final guild = guilds[myState.guildId];
-    final color = guildColor(myState.guildId);
+    final teamColor = guildColor(myState.guildId);
     final topInset = MediaQuery.of(context).padding.top;
+    final hpRatio = (myState.hp / 100).clamp(0.0, 1.0);
+    final guildName = guild?.displayName ?? myState.guildId ?? '-';
+    final guildIdLabel = myState.guildId ?? '';
 
     return Positioned(
       top: topInset + 8,
-      left: 12,
-      right: 84,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.74),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: color.withValues(alpha: 0.65)),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(
-                  width: 10,
-                  height: 10,
-                  decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    '${guild?.displayName ?? myState.guildId ?? '-'} · ${_jobLabel(myState.job)}',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
+      left: FwSpace.x8,
+      right: 64,
+      // 상단 HUD 는 hp/스코어/길드명 등 비교적 자주 갱신되지만 지도 영역과
+      // 독립적으로 그려져야 한다. 부모 Stack 의 다른 layer 에 paint 가 번지지
+      // 않도록 raster cache 분리.
+      child: RepaintBoundary(
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+          decoration: BoxDecoration(
+            color: FwColors.cardSurface,
+            borderRadius: BorderRadius.circular(FwRadii.lg),
+            boxShadow: FwShadows.card,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  _AvatarTile(teamColor: teamColor, job: myState.job),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                guildName,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: FwText.display.copyWith(fontSize: 17),
+                              ),
+                            ),
+                            if (guildIdLabel.isNotEmpty) ...[
+                              const SizedBox(width: 6),
+                              Text(
+                                '($guildIdLabel)',
+                                style: FwText.caption,
+                              ),
+                            ],
+                          ],
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          _jobLabel(myState.job),
+                          style: FwText.label.copyWith(
+                            color: FwColors.ink500,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        _HpBar(ratio: hpRatio, hp: myState.hp),
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            Text(
+                              'HP ${myState.hp}/100',
+                              style: FwText.mono,
+                            ),
+                            const Spacer(),
+                            Text(
+                              '생존 $aliveCount명',
+                              style: FwText.caption.copyWith(
+                                color: FwColors.ink500,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
                   ),
-                ),
-                Text(
-                  '생존 $aliveCount',
-                  style: const TextStyle(color: Colors.white70, fontSize: 11),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Stack(
-              children: [
-                Container(
-                  height: 6,
-                  decoration: BoxDecoration(
-                    color: Colors.white12,
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                ),
-                FractionallySizedBox(
-                  widthFactor: (myState.hp / 100).clamp(0.0, 1.0),
-                  child: Container(
-                    height: 6,
-                    decoration: BoxDecoration(
-                      color: myState.hp > 40 ? Colors.greenAccent : Colors.redAccent,
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Text(
-              'HP ${myState.hp}/100${myState.inDuel ? ' · 대결 중' : ''}',
-              style: const TextStyle(color: Colors.white54, fontSize: 10),
-            ),
-            const SizedBox(height: 2),
-            Text(
-              _statusLine(myState),
-              style: const TextStyle(color: Colors.white38, fontSize: 10),
-            ),
-          ],
+                ],
+              ),
+              const SizedBox(height: 10),
+              _BadgeRow(myState: myState),
+            ],
+          ),
         ),
       ),
     );
-  }
-
-  String _statusLine(FwMyState myState) {
-    final parts = <String>[];
-    if (myState.isGuildMaster) {
-      parts.add('길드 마스터');
-    }
-    if (myState.job == 'warrior') {
-      parts.add('목숨 ${myState.remainingLives}');
-    }
-    if (myState.shieldCount > 0) {
-      parts.add('보호막 ${myState.shieldCount}');
-    }
-    if (myState.isBuffActive) {
-      parts.add('버프 활성');
-    }
-    if (myState.isRevealActive && myState.trackedTargetUserId != null) {
-      parts.add('추적 활성');
-    }
-    if (myState.isExecutionReady) {
-      parts.add('처형 준비');
-    }
-    if (!myState.isAlive) {
-      parts.add(myState.dungeonEntered ? '던전 대기' : '탈락');
-    }
-    return parts.isEmpty ? '스킬 준비' : parts.join(' · ');
   }
 
   String _jobLabel(String? job) => switch (job) {
@@ -141,206 +123,195 @@ class FwTopHud extends StatelessWidget {
       };
 }
 
-class FwWorldStatusPanel extends StatelessWidget {
-  const FwWorldStatusPanel({
-    super.key,
-    required this.myState,
-    required this.dungeons,
-    required this.memberLabels,
-    this.bleSummary,
-    this.duelDebugLines = const [],
-  });
+class _AvatarTile extends StatelessWidget {
+  const _AvatarTile({required this.teamColor, required this.job});
 
-  final FwMyState myState;
-  final List<FwDungeonState> dungeons;
-  final Map<String, String> memberLabels;
-  final String? bleSummary;
-  final List<String> duelDebugLines;
+  final Color teamColor;
+  final String? job;
 
   @override
   Widget build(BuildContext context) {
-    final topInset = MediaQuery.of(context).padding.top;
-    final dungeon = dungeons.isNotEmpty ? dungeons.first : null;
-    final artifactHolder = dungeon?.artifact.heldBy;
-    final artifactLabel =
-        artifactHolder == null ? '미확보' : memberLabels[artifactHolder] ?? artifactHolder;
-    final trackedLabel = myState.trackedTargetUserId == null
-        ? null
-        : memberLabels[myState.trackedTargetUserId!] ?? myState.trackedTargetUserId!;
-
-    final rows = <String>[
-      if (bleSummary != null) bleSummary!,
-      if (dungeon != null) '${dungeon.displayName} · ${_dungeonLabel(dungeon.status)}',
-      '성유물 · $artifactLabel',
-      if (myState.isRevealActive && trackedLabel != null) '추적 대상 · $trackedLabel',
-      if (!myState.isAlive && myState.dungeonEntered)
-        '부활 대기 · ${(100 * (myState.nextReviveChance ?? 0.3)).round()}%',
-    ];
-
-    if (rows.isEmpty) {
-      return const SizedBox.shrink();
-    }
-
-    return Positioned(
-      top: topInset + 88,
-      right: 12,
-      child: Container(
-        width: 182,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          color: const Color(0xCC101827),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: Colors.white12),
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Container(
+          width: 56,
+          height: 56,
+          decoration: BoxDecoration(
+            color: teamColor.withValues(alpha: 0.12),
+            shape: BoxShape.circle,
+            border: Border.all(color: teamColor, width: 2),
+          ),
+          alignment: Alignment.center,
+          child: Icon(
+            _jobIcon(job),
+            color: teamColor,
+            size: 26,
+          ),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              '전장 정보',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.w700,
-              ),
+        Positioned(
+          right: -2,
+          top: -2,
+          child: Container(
+            width: 22,
+            height: 22,
+            decoration: const BoxDecoration(
+              color: FwColors.cardSurface,
+              shape: BoxShape.circle,
+              boxShadow: FwShadows.card,
             ),
-            const SizedBox(height: 8),
-            for (final row in rows) ...[
-              Text(
-                row,
-                style: const TextStyle(color: Colors.white70, fontSize: 11),
-              ),
-              const SizedBox(height: 4),
-            ],
-            if (duelDebugLines.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              Container(height: 1, color: Colors.white12),
-              const SizedBox(height: 8),
-              const Text(
-                '결투 판정',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 6),
-              for (final line in duelDebugLines) ...[
-                Text(
-                  line,
-                  style: const TextStyle(color: Colors.white70, fontSize: 11),
-                ),
-                const SizedBox(height: 4),
-              ],
-            ],
-          ],
+            alignment: Alignment.center,
+            child: const Icon(Icons.star_rounded,
+                size: 14, color: FwColors.teamGold),
+          ),
         ),
-      ),
+      ],
     );
   }
 
-  String _dungeonLabel(String status) => switch (status) {
-        'open' => '개방',
-        'cleared' => '정리됨',
-        'closed' => '폐쇄',
-        _ => status,
+  IconData _jobIcon(String? j) => switch (j) {
+        'warrior' => Icons.shield,
+        'priest' => Icons.healing,
+        'mage' => Icons.auto_awesome,
+        'ranger' => Icons.visibility,
+        'rogue' => Icons.local_fire_department,
+        _ => Icons.person,
       };
 }
 
-class FwControlPointChips extends StatelessWidget {
-  const FwControlPointChips({
-    super.key,
-    required this.controlPoints,
-    required this.myGuildId,
-    this.bottomOffset = 0,
-  });
+class _HpBar extends StatelessWidget {
+  const _HpBar({required this.ratio, required this.hp});
 
-  final List<FwControlPoint> controlPoints;
-  final String? myGuildId;
-  final double bottomOffset;
+  final double ratio;
+  final int hp;
 
   @override
   Widget build(BuildContext context) {
-    return Positioned(
-      left: 0,
-      right: 0,
-      bottom: bottomOffset + 8,
-      child: SizedBox(
-        height: 38,
-        child: ListView.separated(
-          scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          itemCount: controlPoints.length,
-          separatorBuilder: (_, __) => const SizedBox(width: 6),
-          itemBuilder: (_, index) => _CpChip(
-            cp: controlPoints[index],
-            myGuildId: myGuildId,
+    final fillColor = hp > 40 ? FwColors.accentHealth : FwColors.danger;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(FwRadii.pill),
+      child: Stack(
+        children: [
+          Container(
+            height: 8,
+            color: const Color(0xFFEFEFEF),
           ),
-        ),
+          FractionallySizedBox(
+            widthFactor: ratio,
+            child: Container(
+              height: 8,
+              color: fillColor,
+            ),
+          ),
+        ],
       ),
     );
   }
 }
 
-class _CpChip extends StatelessWidget {
-  const _CpChip({required this.cp, this.myGuildId});
+class _BadgeRow extends StatelessWidget {
+  const _BadgeRow({required this.myState});
 
-  final FwControlPoint cp;
-  final String? myGuildId;
+  final FwMyState myState;
 
   @override
   Widget build(BuildContext context) {
-    final owned = cp.capturedBy != null;
-    final capturing = cp.capturingGuild != null;
-    final isMyGuild = cp.capturedBy == myGuildId;
-
-    Color borderColor;
-    Color bgColor;
-    if (cp.isBlockaded) {
-      borderColor = Colors.redAccent;
-      bgColor = Colors.redAccent.withValues(alpha: 0.16);
-    } else if (owned && isMyGuild) {
-      borderColor = guildColor(cp.capturedBy);
-      bgColor = guildColor(cp.capturedBy).withValues(alpha: 0.24);
-    } else if (owned) {
-      borderColor = guildColor(cp.capturedBy).withValues(alpha: 0.72);
-      bgColor = Colors.black.withValues(alpha: 0.62);
-    } else if (capturing) {
-      borderColor = guildColor(cp.capturingGuild).withValues(alpha: 0.82);
-      bgColor = guildColor(cp.capturingGuild).withValues(alpha: 0.14);
-    } else {
-      borderColor = Colors.white24;
-      bgColor = Colors.black.withValues(alpha: 0.62);
-    }
-
-    var label = cp.displayName;
-    if (cp.isBlockaded) {
-      label += ' [봉쇄]';
-    } else if (cp.requiredCount > 0) {
-      label += ' ${cp.readyCount}/${cp.requiredCount}';
-    } else if (capturing) {
-      label += ' [점령 중]';
-    }
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: bgColor,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: borderColor, width: 1.5),
+    final badges = <_BadgeData>[
+      _BadgeData(
+        active: myState.isGuildMaster,
+        label: '길드 마스터',
+        color: FwColors.teamGold,
       ),
-      child: Text(
-        label,
-        style: TextStyle(
-          color: isMyGuild ? guildColor(cp.capturedBy) : Colors.white,
-          fontSize: 11,
-          fontWeight: FontWeight.w600,
+      if (myState.job == 'warrior')
+        _BadgeData(
+          active: myState.remainingLives > 0,
+          label: '목숨 ${myState.remainingLives}',
+          color: FwColors.danger,
+        )
+      else
+        const _BadgeData(
+          active: false,
+          label: '목숨 1',
+          color: FwColors.ink300,
         ),
+      _BadgeData(
+        active: myState.shieldCount > 0,
+        label: '보호막 ${myState.shieldCount}',
+        color: FwColors.accentInfo,
+      ),
+      _BadgeData(
+        active: myState.isBuffActive,
+        label: '버프 활성',
+        color: FwColors.accentHealth,
+      ),
+    ];
+
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [for (final b in badges) _BadgeChip(data: b)],
+    );
+  }
+}
+
+class _BadgeData {
+  const _BadgeData({
+    required this.active,
+    required this.label,
+    required this.color,
+  });
+  final bool active;
+  final String label;
+  final Color color;
+}
+
+class _BadgeChip extends StatelessWidget {
+  const _BadgeChip({required this.data});
+
+  final _BadgeData data;
+
+  @override
+  Widget build(BuildContext context) {
+    final dim = !data.active;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color:
+            dim ? const Color(0xFFF6F7F9) : data.color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(FwRadii.sm),
+        border: Border.all(
+          color: dim ? FwColors.hairline : data.color.withValues(alpha: 0.25),
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 6,
+            height: 6,
+            decoration: BoxDecoration(
+              color: dim ? FwColors.ink300 : data.color,
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            data.label,
+            style: FwText.caption.copyWith(
+              color: dim ? FwColors.ink500 : FwColors.ink900,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ],
       ),
     );
   }
 }
 
-class FwSkillButton extends StatelessWidget {
+// 직업 스킬 버튼.
+// 쿨타임 중 = 어두운 배경 + 아래에서 위로 컬러 fill (잔여시간에 비례) + 중앙에 큰 잔여 초.
+// 쿨타임 끝 = 100% fill (직업 컬러) + glow + 아이콘 + 라벨, 탭 가능.
+class FwSkillButton extends StatefulWidget {
   const FwSkillButton({
     super.key,
     required this.job,
@@ -355,59 +326,239 @@ class FwSkillButton extends StatelessWidget {
   final double bottomOffset;
 
   @override
-  Widget build(BuildContext context) {
-    final skill = _skillForJob(job);
+  State<FwSkillButton> createState() => _FwSkillButtonState();
+}
+
+class _FwSkillButtonState extends State<FwSkillButton>
+    with SingleTickerProviderStateMixin {
+  Ticker? _ticker;
+  // 쿨타임 시작/길이 추적 — 진행도(progress) 계산에 필요.
+  // skillUsedAt[skill] 값(=종료 timestamp) 이 새로 갱신되면 그때의 잔여를
+  // duration 으로 캡처한다.
+  int _trackedEndsAt = 0;
+  int _durationMs = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _ticker = createTicker((_) {
+      if (mounted) setState(() {});
+    });
+    _syncCooldown();
+  }
+
+  @override
+  void didUpdateWidget(covariant FwSkillButton old) {
+    super.didUpdateWidget(old);
+    _syncCooldown();
+  }
+
+  @override
+  void dispose() {
+    _ticker?.dispose();
+    super.dispose();
+  }
+
+  void _syncCooldown() {
+    final skill = _skillForJob(widget.job);
     if (skill == null) {
-      return const SizedBox.shrink();
+      _ticker?.stop();
+      return;
+    }
+    final endsAt = widget.skillUsedAt[skill] ?? 0;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (endsAt > now && endsAt != _trackedEndsAt) {
+      _trackedEndsAt = endsAt;
+      _durationMs = endsAt - now;
+    } else if (endsAt <= now) {
+      _trackedEndsAt = 0;
+      _durationMs = 0;
+    }
+    if (endsAt > now) {
+      if (!(_ticker?.isActive ?? false)) _ticker?.start();
+    } else {
+      _ticker?.stop();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final skill = _skillForJob(widget.job);
+    final compact = MediaQuery.of(context).size.width < 390;
+    final size = compact ? 60.0 : 64.0;
+
+    // 전사 등 직접 발동 스킬이 없는 직업은 비활성 placeholder 로 항상 표시.
+    // 빈 자리로 두면 "스킬 버튼이 사라졌다" 로 오해 받음.
+    if (skill == null) {
+      return Positioned(
+        right: compact ? 12 : 16,
+        bottom: widget.bottomOffset + (compact ? 8 : 16),
+        child: Tooltip(
+          message: _passiveJobTooltip(widget.job),
+          child: GestureDetector(
+            onTap: widget.onPressed,
+            child: Opacity(
+              opacity: 0.55,
+              child: Container(
+                width: size,
+                height: size,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: const Color(0xFF1F2937),
+                  border: Border.all(
+                    color: const Color(0xFF6B7280),
+                    width: 1.6,
+                  ),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x33000000),
+                      blurRadius: 8,
+                      offset: Offset(0, 3),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.shield_outlined,
+                      color: const Color(0xFFD1D5DB),
+                      size: compact ? 22 : 24,
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '패시브',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: const Color(0xFFD1D5DB),
+                        fontSize: compact ? 9.5 : 10,
+                        fontWeight: FontWeight.w800,
+                        height: 1.0,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
     }
 
-    final cooldownEndsAt = skillUsedAt[skill] ?? 0;
+    final endsAt = widget.skillUsedAt[skill] ?? 0;
     final now = DateTime.now().millisecondsSinceEpoch;
-    final remainMs = cooldownEndsAt - now;
+    final remainMs = endsAt - now;
     final onCooldown = remainMs > 0;
     final remainSec = onCooldown ? (remainMs / 1000).ceil() : 0;
 
+    // 진행도: 0(방금 사용) → 1(쿨타임 끝). fill 의 heightFactor 로 사용.
+    final progress = onCooldown && _durationMs > 0
+        ? (1.0 - remainMs / _durationMs).clamp(0.0, 1.0)
+        : 1.0;
+
+    final color = _skillColor(skill);
+
     return Positioned(
-      right: 16,
-      bottom: bottomOffset + 16,
-      child: GestureDetector(
-        onTap: onCooldown ? null : onPressed,
-        child: Container(
-          width: 72,
-          height: 72,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: onCooldown ? Colors.grey.shade800 : const Color(0xFF0F766E),
-            border: Border.all(
-              color: onCooldown ? Colors.grey : const Color(0xFF5EEAD4),
-              width: 2,
+      right: compact ? 12 : 16,
+      bottom: widget.bottomOffset + (compact ? 8 : 16),
+      // 스킬 버튼은 쿨타임 동안 ticker 가 매초 진행도를 그려 frequent
+      // repaint 가 일어난다. 부모 Stack 의 다른 layer 와 raster 를 분리해
+      // 지도 PlatformView 가 같이 무효화되지 않도록 함.
+      child: RepaintBoundary(
+        child: Tooltip(
+          message: _skillTooltip(skill),
+          child: GestureDetector(
+            onTap: onCooldown ? null : widget.onPressed,
+            child: Container(
+              width: size,
+              height: size,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                // 쿨타임 중: 어두운 배경에서 fill 이 컬러로 채워짐.
+                // Ready: 직업 컬러 가득 + glow.
+                color: onCooldown
+                    ? const Color(0xFF1F2937) // gray-800
+                    : color,
+                border: Border.all(
+                  color: color,
+                  width: onCooldown ? 1.6 : 2.6,
+                ),
+                boxShadow: onCooldown
+                    ? const [
+                        BoxShadow(
+                          color: Color(0x33000000),
+                          blurRadius: 8,
+                          offset: Offset(0, 3),
+                        ),
+                      ]
+                    : [
+                        BoxShadow(
+                          color: color.withValues(alpha: 0.55),
+                          blurRadius: 18,
+                          spreadRadius: 1,
+                          offset: const Offset(0, 4),
+                        ),
+                        const BoxShadow(
+                          color: Color(0x33000000),
+                          blurRadius: 8,
+                          offset: Offset(0, 3),
+                        ),
+                      ],
+              ),
+              child: ClipOval(
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    // 아래→위 vertical fill (쿨타임 중에만 노출).
+                    if (onCooldown)
+                      Align(
+                        alignment: Alignment.bottomCenter,
+                        child: FractionallySizedBox(
+                          heightFactor: progress,
+                          widthFactor: 1.0,
+                          child:
+                              Container(color: color.withValues(alpha: 0.55)),
+                        ),
+                      ),
+                    // 중앙 컨텐츠
+                    if (onCooldown)
+                      Text(
+                        '$remainSec',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: compact ? 22 : 24,
+                          fontWeight: FontWeight.w900,
+                          height: 1.0,
+                        ),
+                      )
+                    else
+                      Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            _skillIcon(skill),
+                            color: Colors.white,
+                            size: compact ? 22 : 24,
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            _skillShortLabel(skill),
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: compact ? 9.5 : 10,
+                              fontWeight: FontWeight.w800,
+                              height: 1.0,
+                            ),
+                          ),
+                        ],
+                      ),
+                  ],
+                ),
+              ),
             ),
-            boxShadow: const [
-              BoxShadow(
-                color: Color(0x44000000),
-                blurRadius: 14,
-                offset: Offset(0, 6),
-              ),
-            ],
-          ),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Text(
-                _skillLabel(skill),
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              if (onCooldown)
-                Text(
-                  '${remainSec}s',
-                  style: const TextStyle(color: Colors.white54, fontSize: 10),
-                ),
-            ],
           ),
         ),
       ),
@@ -422,382 +573,45 @@ class FwSkillButton extends StatelessWidget {
         _ => null,
       };
 
-  String _skillLabel(String skill) => switch (skill) {
-        'shield' => '보호막\n(사제)',
-        'blockade' => '봉쇄\n(마법사)',
-        'reveal' => '추적\n(레인저)',
-        'execution' => '처형\n(도적)',
+  String _skillShortLabel(String skill) => switch (skill) {
+        'shield' => '보호막',
+        'blockade' => '봉쇄',
+        'reveal' => '추적',
+        'execution' => '처형',
         _ => skill,
       };
-}
 
-class FwActionDock extends StatelessWidget {
-  const FwActionDock({
-    super.key,
-    required this.bottomOffset,
-    this.captureLabel,
-    this.onCapture,
-    this.duelLabel,
-    this.onDuel,
-    this.dungeonLabel,
-    this.onDungeon,
-  });
+  String _skillTooltip(String skill) => switch (skill) {
+        'shield' => '사제: 아군에게 보호막을 부여합니다.',
+        'blockade' => '마법사: 점령지를 잠시 봉쇄합니다.',
+        'reveal' => '레인저: 적 위치를 추적합니다.',
+        'execution' => '도적: 다음 결투 승리 시 처형을 준비합니다.',
+        _ => skill,
+      };
 
-  final double bottomOffset;
-  final String? captureLabel;
-  final VoidCallback? onCapture;
-  final String? duelLabel;
-  final VoidCallback? onDuel;
-  final String? dungeonLabel;
-  final VoidCallback? onDungeon;
+  // 직접 발동 스킬이 없는 직업 (전사 등) 의 안내.
+  String _passiveJobTooltip(String? job) => switch (job) {
+        'warrior' => '전사는 직접 발동 스킬이 없습니다 (방어 패시브).',
+        _ => '이 직업은 직접 발동 스킬이 없습니다.',
+      };
 
-  @override
-  Widget build(BuildContext context) {
-    final actions = <Widget>[
-      if (captureLabel != null)
-        _ActionChip(
-          label: captureLabel!,
-          color: const Color(0xFF0F766E),
-          onTap: onCapture,
-        ),
-      if (duelLabel != null)
-        _ActionChip(
-          label: duelLabel!,
-          color: const Color(0xFF991B1B),
-          onTap: onDuel,
-        ),
-      if (dungeonLabel != null)
-        _ActionChip(
-          label: dungeonLabel!,
-          color: const Color(0xFF4338CA),
-          onTap: onDungeon,
-        ),
-    ];
+  IconData _skillIcon(String skill) => switch (skill) {
+        'shield' => Icons.shield_rounded,
+        'blockade' => Icons.block_rounded,
+        'reveal' => Icons.radar_rounded,
+        'execution' => Icons.flash_on_rounded,
+        _ => Icons.auto_fix_high_rounded,
+      };
 
-    if (actions.isEmpty) {
-      return const SizedBox.shrink();
-    }
-
-    return Positioned(
-      left: 12,
-      bottom: bottomOffset + 16,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          for (final action in actions) ...[
-            action,
-            const SizedBox(height: 8),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _ActionChip extends StatelessWidget {
-  const _ActionChip({
-    required this.label,
-    required this.color,
-    this.onTap,
-  });
-
-  final String label;
-  final Color color;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
-        child: Ink(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          decoration: BoxDecoration(
-            color: color.withValues(alpha: 0.88),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: Colors.white24),
-          ),
-          child: Text(
-            label,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 12,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class FwDuelChallengeDialog extends StatelessWidget {
-  const FwDuelChallengeDialog({
-    super.key,
-    required this.duelId,
-    required this.opponentId,
-    required this.onAccept,
-    required this.onReject,
-  });
-
-  final String duelId;
-  final String? opponentId;
-  final VoidCallback onAccept;
-  final VoidCallback onReject;
-
-  @override
-  Widget build(BuildContext context) {
-    return Positioned.fill(
-      child: ColoredBox(
-        color: Colors.black54,
-        child: Center(
-          child: Container(
-            margin: const EdgeInsets.all(32),
-            padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-              color: const Color(0xFF1E1B4B),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: Colors.purpleAccent),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Text(
-                  '대결 도전',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  '${opponentId ?? '상대'}님이 1:1 대결을 요청했습니다.',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.white70),
-                ),
-                const SizedBox(height: 20),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    TextButton(
-                      onPressed: onReject,
-                      child: const Text(
-                        '거절',
-                        style: TextStyle(color: Colors.redAccent),
-                      ),
-                    ),
-                    ElevatedButton(
-                      onPressed: onAccept,
-                      style: ElevatedButton.styleFrom(backgroundColor: Colors.purple),
-                      child: const Text('수락'),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class FwChallengingIndicator extends StatelessWidget {
-  const FwChallengingIndicator({
-    super.key,
-    required this.opponentId,
-    required this.onCancel,
-  });
-
-  final String? opponentId;
-  final VoidCallback onCancel;
-
-  @override
-  Widget build(BuildContext context) {
-    return Positioned.fill(
-      child: ColoredBox(
-        color: Colors.black38,
-        child: Center(
-          child: Container(
-            margin: const EdgeInsets.all(32),
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: const Color(0xCC111827),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: Colors.white24),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const CircularProgressIndicator(),
-                const SizedBox(height: 14),
-                Text(
-                  '${opponentId ?? '상대'}에게 대결 요청 중',
-                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
-                ),
-                const SizedBox(height: 10),
-                TextButton(
-                  onPressed: onCancel,
-                  child: const Text('취소'),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class FwDuelResultOverlay extends StatelessWidget {
-  const FwDuelResultOverlay({
-    super.key,
-    required this.result,
-    required this.myId,
-    required this.onClose,
-  });
-
-  final FwDuelResult result;
-  final String? myId;
-  final VoidCallback onClose;
-
-  @override
-  Widget build(BuildContext context) {
-    final isDraw = result.isDraw;
-    final isWin = !isDraw && result.winnerId == myId;
-    final title = switch ((isDraw, isWin)) {
-      (true, _) => '무승부',
-      (false, true) => '승리',
-      _ => '패배',
-    };
-    final color = switch ((isDraw, isWin)) {
-      (true, _) => Colors.orangeAccent,
-      (false, true) => Colors.amber,
-      _ => Colors.redAccent,
-    };
-
-    final detailParts = <String>[
-      _reasonLabel(result.reason),
-      if (result.shieldAbsorbed) '보호막 소모',
-      if (result.executionTriggered) '처형 발동',
-      if (result.warriorHpResult != null) '전사 잔여 목숨 ${result.warriorHpResult}',
-    ];
-
-    return Positioned.fill(
-      child: ColoredBox(
-        color: Colors.black54,
-        child: Center(
-          child: GestureDetector(
-            onTap: onClose,
-            child: Container(
-              margin: const EdgeInsets.all(28),
-              padding: const EdgeInsets.all(22),
-              decoration: BoxDecoration(
-                color: const Color(0xEE111827),
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(color: color.withValues(alpha: 0.7), width: 2),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    title,
-                    style: TextStyle(
-                      color: color,
-                      fontSize: 30,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Text(
-                    detailParts.where((part) => part.isNotEmpty).join(' · '),
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(color: Colors.white70, fontSize: 13),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  String _reasonLabel(String reason) => switch (reason) {
-        'minigame' => '미니게임 판정',
-        'opponent_timeout' => '상대 시간 초과',
-        'both_timed_out' => '양측 시간 초과',
-        'invalidated' => '무효 처리',
-        _ => reason,
+  // 직업별 강조 컬러 — 일관된 디자인 토큰.
+  Color _skillColor(String skill) => switch (skill) {
+        'shield' => const Color(0xFF06B6D4), // cyan-500 (priest)
+        'blockade' => const Color(0xFF8B5CF6), // violet-500 (mage)
+        'reveal' => const Color(0xFF10B981), // emerald-500 (ranger)
+        'execution' => const Color(0xFFEF4444), // red-500 (rogue)
+        _ => const Color(0xFF0F766E),
       };
 }
 
-class FwGameOverOverlay extends StatelessWidget {
-  const FwGameOverOverlay({
-    super.key,
-    required this.winCondition,
-    required this.myGuildId,
-    required this.guilds,
-    required this.onLeave,
-  });
-
-  final Map<String, dynamic> winCondition;
-  final String? myGuildId;
-  final Map<String, FwGuildInfo> guilds;
-  final VoidCallback onLeave;
-
-  @override
-  Widget build(BuildContext context) {
-    final winner = winCondition['winner'] as String?;
-    final reason = winCondition['reason'] as String?;
-    final isWin = winner == myGuildId;
-    final winnerGuild = guilds[winner];
-    final color = isWin ? Colors.amber : Colors.grey;
-
-    return Positioned.fill(
-      child: ColoredBox(
-        color: Colors.black.withValues(alpha: 0.84),
-        child: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                isWin ? '승리!' : '패배',
-                style: TextStyle(
-                  color: color,
-                  fontSize: 40,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 12),
-              Text(
-                '${winnerGuild?.displayName ?? winner ?? '?'} 길드 승리',
-                style: const TextStyle(color: Colors.white70, fontSize: 18),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                _reasonLabel(reason),
-                style: const TextStyle(color: Colors.white38, fontSize: 14),
-              ),
-              const SizedBox(height: 32),
-              ElevatedButton(
-                onPressed: onLeave,
-                child: const Text('나가기'),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  String _reasonLabel(String? reason) => switch (reason) {
-        'control_point_majority' => '거점 3개 점령',
-        'guild_master_eliminated' => '상대 길드 마스터 제거',
-        'last_standing_by_score' => '동시 탈락 후 점수 판정',
-        _ => reason ?? '',
-      };
-}
+// FwGameOverOverlay 는 widgets/fw_game_result_screen.dart 의 FwGameResultScreen
+// 으로 대체되었다. 호출처(fantasy_wars_game_screen.dart) 에서 더 이상 참조하지 않음.

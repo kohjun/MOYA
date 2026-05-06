@@ -22,19 +22,19 @@ class AiMasterState {
 }
 
 class AiMasterNotifier extends StateNotifier<AiMasterState> {
-  AiMasterNotifier(this._sessionId, this._ref)
-      : super(const AiMasterState()) {
+  AiMasterNotifier(this._sessionId, this._ref) : super(const AiMasterState()) {
     _init();
   }
 
   final String _sessionId;
   final Ref _ref;
-  StreamSubscription<dynamic>? _sub;
+  StreamSubscription<dynamic>? _failedSub;
+  StreamSubscription<dynamic>? _recoveredSub;
 
   void _init() {
     final socket = SocketService();
 
-    _sub = socket
+    _failedSub = socket
         .onGameEvent('ai:failed')
         .where((data) => data['sessionId'] == _sessionId)
         .listen((data) {
@@ -45,7 +45,7 @@ class AiMasterNotifier extends StateNotifier<AiMasterState> {
       );
     });
 
-    socket
+    _recoveredSub = socket
         .onGameEvent('ai:recovered')
         .where((data) => data['sessionId'] == _sessionId)
         .listen((_) {
@@ -73,7 +73,8 @@ class AiMasterNotifier extends StateNotifier<AiMasterState> {
 
   @override
   void dispose() {
-    _sub?.cancel();
+    _failedSub?.cancel();
+    _recoveredSub?.cancel();
     super.dispose();
   }
 }

@@ -70,6 +70,9 @@ dependencies:
   # [Task 2] 효과음
   audioplayers: ^6.0.0
 
+  # 다크 판타지 폰트 (Cinzel)
+  google_fonts: ^6.2.1
+
   # 유틸
   intl: ^0.19.0
   uuid: ^4.4.0
@@ -77,6 +80,8 @@ dependencies:
   json_annotation: ^4.9.0
   flutter_background_service: ^5.1.0
   share_plus: ^10.0.0
+  sentry_flutter: ^8.14.2
+  firebase_performance: ^0.10.1+10
 
 dev_dependencies:
   flutter_test:
@@ -92,6 +97,7 @@ flutter:
   assets:
     - assets/images/
     - assets/sounds/
+    - assets/sounds/fw/
 
 dependency_overrides:
   # 💡 [수정됨] 캐시 대신 내부 packages 폴더의 코드를 사용합니다.
